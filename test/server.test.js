@@ -12,6 +12,8 @@ async function run(){
   assert.deepStrictEqual(config.domains[0].dkim_selectors,['s1','s2']);
   assert.deepStrictEqual(config.domains[0].tls_endpoints,[{host:'mta-sts.example.com',port:443},{host:'mail.example.com',port:465}]);
   assert.strictEqual(app.mxMatch('mx1.example.com','*.example.com'),true);
+  assert.strictEqual(app.selectSourceField({source_ip_address:{text:{aggregatable:false}},'source_ip_address.keyword':{keyword:{aggregatable:true}}}),'source_ip_address.keyword');
+  assert.strictEqual(app.selectSourceField({source_ip_address:{text:{aggregatable:false}}}),null);
   process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);
   assert.match(fs.readFileSync('public/index.html','utf8'),/MailPosture/);
   console.log('All MailPosture checks passed.');

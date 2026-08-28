@@ -78,7 +78,7 @@ async function dmarc(domain) {
 
 function get(url, maxBytes = 1048576) {
   return new Promise((resolve, reject) => {
-    const req = (url.startsWith('https:') ? https : http).get(url, { timeout: TIMEOUT, headers: { 'user-agent': 'MailPosture/0.2' } }, res => {
+    const req = (url.startsWith('https:') ? https : http).get(url, { timeout: TIMEOUT, headers: { 'user-agent': 'MailPosture/0.2.1' } }, res => {
       const chunks = []; let size = 0;
       res.on('data', c => { size += c.length; if (size > maxBytes) req.destroy(new Error('Response is too large')); else chunks.push(c); });
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
@@ -158,21 +158,40 @@ async function dkim(domain, selectors) {
   return result('dkim', 'DKIM', status, `${keys.length - bad.length}/${keys.length} selectors healthy`, bad.map(v => `${v.selector}: ${v.issue}`).join('; ') || 'Every configured selector publishes a usable key.', status === 'healthy' ? 'Retire old selectors only after mail has aged out.' : 'Replace missing, revoked, or weak keys.', { selectors: keys });
 }
 
-function osRequest(config, body) {
-  const url = new URL(`${config.url.replace(/\/$/, '')}/${config.index}/_search`); const payload = Buffer.from(JSON.stringify(body)); const auth = Buffer.from(`${config.username}:${config.password}`).toString('base64');
+function osRequest(config, endpoint, method = 'GET', body = null) {
+  const url = new URL(`${config.url.replace(/\/$/, '')}/${config.index}/${endpoint}`); const payload = body === null ? null : Buffer.from(JSON.stringify(body)); const auth = Buffer.from(`${config.username}:${config.password}`).toString('base64');
   return new Promise((resolve, reject) => {
-    const req = (url.protocol === 'https:' ? https : http).request(url, { method: 'POST', timeout: TIMEOUT, rejectUnauthorized: config.verify_tls, headers: { authorization: `Basic ${auth}`, 'content-type': 'application/json', 'content-length': payload.length } }, res => {
-      const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => { try { const data = JSON.parse(Buffer.concat(chunks)); res.statusCode < 300 ? resolve(data) : reject(new Error(data.error?.reason || `OpenSearch HTTP ${res.statusCode}`)); } catch (e) { reject(e); } });
-    }); req.on('timeout', () => req.destroy(new Error('OpenSearch timed out'))); req.on('error', reject); req.end(payload);
+    const headers = { authorization: `Basic ${auth}`, accept: 'application/json' }; if (payload) { headers['content-type'] = 'application/json'; headers['content-length'] = payload.length; }
+    const req = (url.protocol === 'https:' ? https : http).request(url, { method, timeout: TIMEOUT, rejectUnauthorized: config.verify_tls, headers }, res => {
+      const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => { try { const data = JSON.parse(Buffer.concat(chunks)); const reason = data.error?.root_cause?.[0]?.reason || data.error?.caused_by?.reason || data.error?.reason; res.statusCode < 300 ? resolve(data) : reject(new Error(reason || `OpenSearch HTTP ${res.statusCode}`)); } catch (e) { reject(e); } });
+    }); req.on('timeout', () => req.destroy(new Error('OpenSearch timed out'))); req.on('error', reject); req.end(payload || undefined);
   });
+}
+
+function selectSourceField(fields = {}) {
+  const base = Object.values(fields.source_ip_address || {}).some(definition => definition.aggregatable);
+  if (base) return 'source_ip_address';
+  const keyword = Object.values(fields['source_ip_address.keyword'] || {}).some(definition => definition.aggregatable);
+  return keyword ? 'source_ip_address.keyword' : null;
+}
+
+const sourceFieldCache = new Map();
+async function sourceAggregationField(config) {
+  const key = `${config.url}/${config.index}`;
+  if (!sourceFieldCache.has(key)) sourceFieldCache.set(key, osRequest(config, '_field_caps?fields=source_ip_address,source_ip_address.keyword').then(data => selectSourceField(data.fields)).catch(() => null));
+  return sourceFieldCache.get(key);
 }
 
 async function reports(domain, config, days) {
   if (!config.enabled) return result('dmarc_reports', 'DMARC reports', 'info', 'OpenSearch disabled', 'DNS posture is monitored, but parsedmarc aggregate results are not connected.', 'Set OPENSEARCH_ENABLED=true and supply the connection variables to add observed authentication results.');
   try {
-    const data = await osRequest(config, { size: 0, query: { bool: { must: [{ range: { date_begin: { gte: `now-${days}d` } } }, { match_phrase: { header_from: domain } }] } }, aggs: { total: { sum: { field: 'message_count' } }, passed: { filter: { term: { passed_dmarc: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: { total: { sum: { field: 'message_count' } }, sources: { terms: { field: 'source_ip_address', size: 5 }, aggs: { messages: { sum: { field: 'message_count' } } } } } } } });
+    const sourceField = await sourceAggregationField(config);
+    const failedAggregations = { total: { sum: { field: 'message_count' } } };
+    if (sourceField) failedAggregations.sources = { terms: { field: sourceField, size: 5 }, aggs: { messages: { sum: { field: 'message_count' } } } };
+    const data = await osRequest(config, '_search', 'POST', { size: 0, query: { bool: { must: [{ range: { date_begin: { gte: `now-${days}d` } } }, { match_phrase: { header_from: domain } }] } }, aggs: { total: { sum: { field: 'message_count' } }, passed: { filter: { term: { passed_dmarc: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: failedAggregations } } });
     const total = data.aggregations?.total?.value || 0; const passed = data.aggregations?.passed?.total?.value || 0; const failed = data.aggregations?.failed?.total?.value || 0; const rate = total ? Math.round(passed / total * 1000) / 10 : null; const sources = (data.aggregations?.failed?.sources?.buckets || []).map(v => ({ ip: v.key, messages: v.messages?.value || v.doc_count })); const status = !total ? 'warning' : rate < 90 ? 'critical' : rate < 98 ? 'warning' : 'healthy';
-    return result('dmarc_reports', 'DMARC reports', status, total ? `${rate}% aligned` : 'No recent reports', total ? `${Math.round(failed)} of ${Math.round(total)} messages failed in ${days} days.` : 'No matching aggregate reports were found.', total && status !== 'healthy' ? 'Review top failing sources and align legitimate senders.' : 'Watch for new failing sources.', { period_days: days, total, failed, pass_rate: rate, top_failing_sources: sources });
+    const mappingNote = sourceField ? '' : ' Source-IP ranking is unavailable because the field is not aggregatable in these indices.';
+    return result('dmarc_reports', 'DMARC reports', status, total ? `${rate}% aligned` : 'No recent reports', (total ? `${Math.round(failed)} of ${Math.round(total)} messages failed in ${days} days.` : 'No matching aggregate reports were found.') + mappingNote, total && status !== 'healthy' ? (sourceField ? 'Review top failing sources and align legitimate senders.' : 'Review failing records in parsedmarc and align legitimate senders.') : 'Watch for new failing sources.', { period_days: days, total, failed, pass_rate: rate, source_field: sourceField, top_failing_sources: sources });
   } catch (error) { return result('dmarc_reports', 'DMARC reports', 'warning', 'OpenSearch query failed', error.message, 'Verify the OpenSearch environment variables and parsedmarc index.'); }
 }
 
@@ -194,4 +213,4 @@ function staticFile(req, res) { const name = req.url === '/' ? 'index.html' : re
 const server = http.createServer(async (req,res) => { if (req.url === '/healthz') return json(res, snapshot.error ? 503 : 200, { ok: !snapshot.error, uptime_seconds: Math.floor((Date.now()-startedAt)/1000) }); if (req.url === '/api/status' && req.method === 'GET') return json(res,200,snapshot); if (req.url === '/api/refresh' && req.method === 'POST') return json(res,202,await refresh()); staticFile(req,res); });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); refresh(); setInterval(refresh,Math.max(1,REFRESH_MINUTES)*60000).unref(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, tags, policyFile, mxMatch, summarize, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, tags, policyFile, mxMatch, selectSourceField, summarize, refresh, getSnapshot:()=>snapshot };
