@@ -2,10 +2,8 @@ name: mailposture
 
 services:
   mailposture:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mailposture:local
+    image: ${MAILPOSTURE_IMAGE:?Enter the GHCR image, for example ghcr.io/owner/mailposture:latest}
+    pull_policy: always
     container_name: mailposture
     restart: unless-stopped
     environment:

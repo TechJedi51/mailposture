@@ -6,6 +6,7 @@ MailPosture is a generic, read-only status page for DMARC, parsedmarc aggregate 
 
 ```text
 mailposture/
+├── .github/workflows/       # Tests and publishes the image to GHCR
 ├── docker-compose.yml
 ├── Dockerfile
 ├── .env.example
@@ -77,21 +78,48 @@ git remote add origin git@github.com:YOUR_GITHUB_USERNAME/mailposture.git
 git push -u origin main
 ```
 
-## 3. Create the Git stack in Dockhand
+## 3. Let GitHub build the image
+
+The first push to `main` starts **Test and publish container image** under the repository's **Actions** tab. The workflow:
+
+- runs the application tests;
+- builds `linux/amd64` and `linux/arm64` images;
+- publishes `ghcr.io/OWNER/REPOSITORY:latest`;
+- also publishes an immutable `sha-...` tag;
+- publishes version tags when a tag such as `v1.2.0` is pushed.
+
+No registry password is required in the workflow. GitHub's temporary `GITHUB_TOKEN` publishes the image to the repository's GHCR package.
+
+Wait for the workflow to finish successfully before the first Dockhand deployment.
+
+### Public or private image
+
+For the simplest homelab deployment, open the package from the repository's **Packages** section and make the container package public. The source repository can remain private.
+
+To keep the image private, create a GitHub token that can read packages. In Dockhand, open **Settings → Registries** and add:
+
+```text
+Registry: ghcr.io
+Username: your GitHub username
+Password: a token with read:packages access
+```
+
+## 4. Create the Git stack in Dockhand
 
 1. Add credentials for the private GitHub repository under **Settings → Git**.
 2. Create a new Git-backed stack and choose the target Docker environment.
 3. Select the repository and the `main` branch.
 4. Set **Compose file path** to `docker-compose.yml`.
 5. Set **Context directory** to the repository root (`.` or blank).
-6. Enable **Build images on deploy**.
-7. Leave **Disable build cache** off for normal deployments.
+6. Leave **Build images on deploy** disabled; GitHub has already built the image.
+7. Enable **Re-pull images** so Dockhand refreshes the `latest` tag.
 8. Add the variables below in Dockhand's environment-variable panel.
 9. Deploy.
 
 ### Required Dockhand variables
 
 ```dotenv
+MAILPOSTURE_IMAGE=ghcr.io/your-github-username/mailposture:latest
 MONITORED_DOMAINS=example.com,example.net
 DKIM_SELECTORS=example.com=selector1|selector2;example.net=google|s1
 TLS_ENDPOINTS=example.com=mta-sts.example.com:443|mail.example.com:465;example.net=www.example.net:443
@@ -118,7 +146,9 @@ PROXY_NETWORK=proxy
 
 The Compose file provides the displayed defaults for optional values. Adding them explicitly to Dockhand makes the deployment settings easier to audit. Set `OPENSEARCH_ENABLED=false` to run only the public DNS and endpoint checks; in that mode, an OpenSearch password is not required.
 
-## 4. Reverse proxy
+Use the lowercase owner and repository path shown on the GitHub package page for `MAILPOSTURE_IMAGE`.
+
+## 5. Reverse proxy
 
 The stack joins two external networks. Their defaults are `monitoring` and `proxy`, and both must already exist on the target Docker environment. Other users can set `MONITORING_NETWORK` and `PROXY_NETWORK` to their own network names without editing the repository.
 
@@ -130,14 +160,15 @@ http://mailposture:8080
 
 Keep authentication at the reverse proxy. MailPosture intentionally does not have a built-in login, and port 8080 is not published to the host.
 
-## 5. Local testing
+## 6. Local testing
 
 Copy the sample environment file and replace its example values locally:
 
 ```bash
 cp .env.example .env
 docker compose config
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 `.env` is excluded by `.gitignore`. It must never be committed.
@@ -159,7 +190,21 @@ git commit -m "Update MailPosture"
 git push
 ```
 
-Then run a Git sync in Dockhand or configure a schedule or webhook. Keep **Build images on deploy** enabled.
+Wait for **Test and publish container image** to complete, then manually deploy or sync the stack in Dockhand. Dockhand will pull the refreshed `latest` image; it will not build locally.
+
+### Optional automatic deployment after the image is ready
+
+A normal GitHub push webhook can reach Dockhand before GHCR has finished building the new image. The included workflow can instead call Dockhand only after publishing succeeds.
+
+After creating the Dockhand Git stack:
+
+1. Configure a webhook secret in that stack and copy its unique webhook URL.
+2. In the GitHub repository, open **Settings → Secrets and variables → Actions**.
+3. Add `DOCKHAND_WEBHOOK_URL` containing the full Dockhand stack webhook URL.
+4. Add `DOCKHAND_WEBHOOK_SECRET` containing the matching secret.
+5. Do not add a separate push webhook for this stack.
+
+On later pushes, GitHub tests and publishes the image first, then signs a deployment request with HMAC-SHA256 and sends it to Dockhand. If either secret is absent, this step is skipped and manual deployment remains available.
 
 ## Existing parsedmarc path correction
 

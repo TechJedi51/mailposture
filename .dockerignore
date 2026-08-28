@@ -7,3 +7,5 @@ README.md
 .env.*
 !.env.example
 .DS_Store
+.github
+test
