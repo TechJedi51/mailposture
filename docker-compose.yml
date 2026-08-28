@@ -1,0 +1,48 @@
+name: mailposture
+
+services:
+  mailposture:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mailposture:local
+    container_name: mailposture
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-UTC}
+      MONITORED_DOMAINS: ${MONITORED_DOMAINS:?Enter one or more domains}
+      DKIM_SELECTORS: ${DKIM_SELECTORS:-}
+      TLS_ENDPOINTS: ${TLS_ENDPOINTS:-}
+      REPORT_DAYS: ${REPORT_DAYS:-7}
+      REFRESH_MINUTES: ${REFRESH_MINUTES:-15}
+      REQUEST_TIMEOUT_MS: ${REQUEST_TIMEOUT_MS:-8000}
+      OPENSEARCH_ENABLED: ${OPENSEARCH_ENABLED:-true}
+      OPENSEARCH_URL: ${OPENSEARCH_URL:-http://parsedmarc-opensearch:9200}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-dmarc_aggregate*}
+      OPENSEARCH_USERNAME: ${OPENSEARCH_USERNAME:-admin}
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:-}
+      OPENSEARCH_VERIFY_TLS: ${OPENSEARCH_VERIFY_TLS:-false}
+    expose:
+      - "8080"
+    networks:
+      - monitoring
+      - proxy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  monitoring:
+    external: true
+    name: ${MONITORING_NETWORK:-monitoring}
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}

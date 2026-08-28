@@ -1,0 +1,9 @@
+.git
+node_modules
+work
+outputs
+README.md
+.env
+.env.*
+!.env.example
+.DS_Store
