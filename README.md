@@ -1,6 +1,6 @@
 # MailPosture with Dockhand
 
-MailPosture is a generic, read-only status page for DMARC, parsedmarc aggregate results, MTA-STS, TLS-RPT, BIMI, TLS certificates, and DKIM. It contains no user-specific domain configuration. Dockhand supplies every deployment value through environment variables.
+MailPosture is a generic, read-only status page for DMARC, parsedmarc aggregate results, DKIM, MTA-STS, TLS-RPT, TLS certificates, and BIMI. It contains no user-specific domain configuration. Operational settings are entered in the web UI and saved in a named Docker volume; Dockhand supplies only deployment and OpenSearch connection values.
 
 ## Included files
 
@@ -15,34 +15,39 @@ mailposture/
 └── test/
 ```
 
-No configuration file or host bind mount is required.
+No host bind mount is required. Docker stores `/data/settings.json` in the `mailposture_data` named volume so image updates do not erase it.
 
-## Environment-variable format
+## Settings screen
+
+After the first deployment, open **Settings** in MailPosture and enter the following values.
 
 ### Domains
 
-Use a comma-separated list:
+Use one domain per line:
 
-```dotenv
-MONITORED_DOMAINS=example.com,example.net
+```text
+example.com
+example.net
 ```
 
 ### DKIM selectors
 
-Use semicolons between domains and vertical bars between selectors:
+Use one domain mapping per line and vertical bars between selectors:
 
-```dotenv
-DKIM_SELECTORS=example.com=selector1|selector2;example.net=google|s1
+```text
+example.com=selector1|selector2
+example.net=google|s1
 ```
 
 An omitted domain receives a visible “No selectors configured” warning. DKIM selectors cannot be discovered reliably from DNS.
 
 ### TLS certificate endpoints
 
-Use the same domain mapping format. Each endpoint is `hostname:port`:
+Use the same line-based mapping format. Each endpoint is `hostname:port`:
 
-```dotenv
-TLS_ENDPOINTS=example.com=mta-sts.example.com:443|mail.example.com:465;example.net=www.example.net:443
+```text
+example.com=mta-sts.example.com:443|mail.example.com:465
+example.net=www.example.net:443
 ```
 
 Direct TLS endpoints such as HTTPS 443, SMTP 465, and IMAP 993 are supported. SMTP STARTTLS on ports 25 and 587 is not currently probed.
@@ -120,31 +125,25 @@ Password: a token with read:packages access
 
 ```dotenv
 MAILPOSTURE_IMAGE=ghcr.io/your-github-username/mailposture:latest
-MONITORED_DOMAINS=example.com,example.net
-DKIM_SELECTORS=example.com=selector1|selector2;example.net=google|s1
-TLS_ENDPOINTS=example.com=mta-sts.example.com:443|mail.example.com:465;example.net=www.example.net:443
 OPENSEARCH_PASSWORD=your-real-opensearch-password
 ```
 
-Mark `OPENSEARCH_PASSWORD` as a secret. It is required when `OPENSEARCH_ENABLED=true`; omit it when OpenSearch integration is disabled.
+Mark `OPENSEARCH_PASSWORD` as a secret. It is required when the OpenSearch switch is enabled in MailPosture Settings; omit it when OpenSearch integration is disabled.
 
 ### Optional Dockhand variables
 
 ```dotenv
 TZ=America/Los_Angeles
-REPORT_DAYS=7
-REFRESH_MINUTES=15
-REQUEST_TIMEOUT_MS=8000
 OPENSEARCH_URL=http://parsedmarc-opensearch:9200
 OPENSEARCH_INDEX=dmarc_aggregate*
 OPENSEARCH_USERNAME=admin
 OPENSEARCH_VERIFY_TLS=false
-OPENSEARCH_ENABLED=true
 MONITORING_NETWORK=monitoring
 PROXY_NETWORK=proxy
+MAILPOSTURE_DATA_VOLUME=mailposture_data
 ```
 
-The Compose file provides the displayed defaults for optional values. Adding them explicitly to Dockhand makes the deployment settings easier to audit. Set `OPENSEARCH_ENABLED=false` to run only the public DNS and endpoint checks; in that mode, an OpenSearch password is not required.
+The Compose file provides the displayed defaults for optional values. Adding them explicitly to Dockhand makes the deployment settings easier to audit. Disable OpenSearch on the Settings screen to run only public DNS and endpoint checks; in that mode, an OpenSearch password is not required.
 
 Use the lowercase owner and repository path shown on the GitHub package page for `MAILPOSTURE_IMAGE`.
 
@@ -170,6 +169,8 @@ docker compose config
 docker compose pull
 docker compose up -d
 ```
+
+Open MailPosture, choose **Settings**, add the monitored domains and mappings, then save. The settings are stored in the named volume rather than `.env`.
 
 `.env` is excluded by `.gitignore`. It must never be committed.
 
@@ -222,4 +223,4 @@ volumes:
 npm test
 ```
 
-MailPosture never writes to DNS, mailboxes, or OpenSearch. Its container uses a read-only filesystem, no Linux capabilities, and no host mounts.
+MailPosture never writes to DNS, mailboxes, or OpenSearch. Its container uses a read-only root filesystem, a writable settings-only named volume, no Linux capabilities, and no host bind mounts.

@@ -9,12 +9,14 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT || 8080);
-const REFRESH_MINUTES = Number(process.env.REFRESH_MINUTES || 15);
-const TIMEOUT = Number(process.env.REQUEST_TIMEOUT_MS || 8000);
+const SETTINGS_PATH = process.env.SETTINGS_PATH || '/data/settings.json';
 const PUBLIC = path.join(__dirname, 'public');
 const startedAt = Date.now();
 let snapshot = { generated_at: null, refreshing: false, domains: [], summary: { critical: 0, warning: 0, healthy: 0 } };
 let activeRefresh = null;
+let runtimeSettings = null;
+let refreshTimer = null;
+let requestTimeoutMs = 8000;
 
 function assignments(value) {
   const output = {};
@@ -26,32 +28,109 @@ function assignments(value) {
   return output;
 }
 
-function envConfig() {
+function endpointValue(value) {
+  const match = String(value).trim().match(/^(.*?)(?::(\d+))?$/);
+  return { host: match[1].toLowerCase().replace(/\.$/, ''), port: Number(match[2] || 443) };
+}
+
+function settingsFromEnv() {
   const domains = String(process.env.MONITORED_DOMAINS || '').split(',').map(v => v.trim().toLowerCase().replace(/\.$/, '')).filter(Boolean);
-  if (!domains.length) throw new Error('MONITORED_DOMAINS must contain at least one domain');
   const selectors = assignments(process.env.DKIM_SELECTORS);
   const endpoints = assignments(process.env.TLS_ENDPOINTS);
-  const reportDays = Number(process.env.REPORT_DAYS || 7);
+  return normalizeSettings({
+    monitored_domains: domains,
+    dkim_selectors: selectors,
+    tls_endpoints: Object.fromEntries(Object.entries(endpoints).map(([domain, values]) => [domain, values.map(endpointValue)])),
+    report_days: Number(process.env.REPORT_DAYS || 7),
+    refresh_minutes: Number(process.env.REFRESH_MINUTES || 15),
+    request_timeout_ms: Number(process.env.REQUEST_TIMEOUT_MS || 8000),
+    opensearch_enabled: String(process.env.OPENSEARCH_ENABLED || 'true').toLowerCase() !== 'false'
+  });
+}
+
+function validDomain(value) {
+  return /^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(value);
+}
+
+function boundedNumber(value, fallback, min, max, label) {
+  const number = Number(value ?? fallback);
+  if (!Number.isFinite(number) || number < min || number > max) throw new Error(`${label} must be between ${min} and ${max}`);
+  return Math.round(number);
+}
+
+function normalizeSettings(input = {}) {
+  const domains = [...new Set((Array.isArray(input.monitored_domains) ? input.monitored_domains : []).map(v => String(v).trim().toLowerCase().replace(/\.$/, '')).filter(Boolean))];
+  for (const domain of domains) if (!validDomain(domain)) throw new Error(`Invalid monitored domain: ${domain}`);
+  const selectors = {};
+  for (const [rawDomain, values] of Object.entries(input.dkim_selectors || {})) {
+    const domain = rawDomain.trim().toLowerCase().replace(/\.$/, '');
+    if (!validDomain(domain)) throw new Error(`Invalid DKIM domain: ${domain}`);
+    selectors[domain] = [...new Set((Array.isArray(values) ? values : []).map(v => String(v).trim()).filter(Boolean))];
+    for (const selector of selectors[domain]) if (!/^[a-z0-9_-]{1,63}$/i.test(selector)) throw new Error(`Invalid DKIM selector: ${selector}`);
+  }
+  const endpoints = {};
+  for (const [rawDomain, values] of Object.entries(input.tls_endpoints || {})) {
+    const domain = rawDomain.trim().toLowerCase().replace(/\.$/, '');
+    if (!validDomain(domain)) throw new Error(`Invalid TLS domain: ${domain}`);
+    endpoints[domain] = (Array.isArray(values) ? values : []).map(value => typeof value === 'string' ? endpointValue(value) : { host: String(value.host || '').trim().toLowerCase().replace(/\.$/, ''), port: Number(value.port || 443) });
+    for (const endpoint of endpoints[domain]) {
+      if (!validDomain(endpoint.host)) throw new Error(`Invalid TLS endpoint host: ${endpoint.host || '(empty)'}`);
+      if (!Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) throw new Error(`Invalid TLS endpoint port for ${endpoint.host}`);
+    }
+  }
+  return {
+    schema_version: 1,
+    monitored_domains: domains,
+    dkim_selectors: selectors,
+    tls_endpoints: endpoints,
+    report_days: boundedNumber(input.report_days, 7, 1, 365, 'Report days'),
+    refresh_minutes: boundedNumber(input.refresh_minutes, 15, 1, 1440, 'Refresh minutes'),
+    request_timeout_ms: boundedNumber(input.request_timeout_ms, 8000, 1000, 60000, 'Request timeout'),
+    opensearch_enabled: input.opensearch_enabled !== false
+  };
+}
+
+function getSettings() {
+  if (runtimeSettings) return runtimeSettings;
+  if (fs.existsSync(SETTINGS_PATH)) runtimeSettings = normalizeSettings(JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')));
+  else runtimeSettings = settingsFromEnv();
+  requestTimeoutMs = runtimeSettings.request_timeout_ms;
+  return runtimeSettings;
+}
+
+async function saveSettings(value) {
+  const settings = normalizeSettings(value);
+  const directory = path.dirname(SETTINGS_PATH);
+  const temporary = `${SETTINGS_PATH}.tmp`;
+  await fs.promises.mkdir(directory, { recursive: true });
+  await fs.promises.writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  await fs.promises.rename(temporary, SETTINGS_PATH);
+  runtimeSettings = settings;
+  requestTimeoutMs = settings.request_timeout_ms;
+  scheduleRefresh(settings.refresh_minutes);
+  return settings;
+}
+
+function settingsConfig(settings = getSettings()) {
   return {
     opensearch: {
-      enabled: String(process.env.OPENSEARCH_ENABLED || 'true').toLowerCase() !== 'false',
+      enabled: settings.opensearch_enabled,
       url: process.env.OPENSEARCH_URL || 'http://parsedmarc-opensearch:9200',
       index: process.env.OPENSEARCH_INDEX || 'dmarc_aggregate*',
       username: process.env.OPENSEARCH_USERNAME || 'admin',
       password: process.env.OPENSEARCH_PASSWORD || '',
       verify_tls: String(process.env.OPENSEARCH_VERIFY_TLS || 'false').toLowerCase() === 'true'
     },
-    domains: domains.map(domain => ({
+    domains: settings.monitored_domains.map(domain => ({
       domain,
-      dkim_selectors: selectors[domain] || [],
-      tls_endpoints: (endpoints[domain] || []).map(value => {
-        const match = value.match(/^(.*?)(?::(\d+))?$/);
-        return { host: match[1], port: Number(match[2] || 443) };
-      }),
-      report_days: reportDays
+      dkim_selectors: settings.dkim_selectors[domain] || [],
+      tls_endpoints: settings.tls_endpoints[domain] || [],
+      report_days: settings.report_days
     }))
   };
 }
+
+function envConfig() { return settingsConfig(settingsFromEnv()); }
 
 function result(id, label, status, summary, detail, action, evidence = {}) { return { id, label, status, summary, detail, action, evidence }; }
 function tags(record) {
@@ -78,7 +157,7 @@ async function dmarc(domain) {
 
 function get(url, maxBytes = 1048576) {
   return new Promise((resolve, reject) => {
-    const req = (url.startsWith('https:') ? https : http).get(url, { timeout: TIMEOUT, headers: { 'user-agent': 'MailPosture/0.2.1' } }, res => {
+    const req = (url.startsWith('https:') ? https : http).get(url, { timeout: requestTimeoutMs, headers: { 'user-agent': 'MailPosture/0.3.0' } }, res => {
       const chunks = []; let size = 0;
       res.on('data', c => { size += c.length; if (size > maxBytes) req.destroy(new Error('Response is too large')); else chunks.push(c); });
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
@@ -131,20 +210,21 @@ async function bimi(domain, dmarcResult) {
 
 function certificate(endpoint) {
   return new Promise(resolve => {
-    const socket = tls.connect({ host: endpoint.host, port: endpoint.port, servername: endpoint.host, rejectUnauthorized: false, timeout: TIMEOUT }, () => {
+    const evidence = { host: endpoint.host, port: endpoint.port };
+    const socket = tls.connect({ host: endpoint.host, port: endpoint.port, servername: endpoint.host, rejectUnauthorized: false, timeout: requestTimeoutMs }, () => {
       const cert = socket.getPeerCertificate(true); const authorized = socket.authorized; const authError = socket.authorizationError; socket.end();
-      if (!cert.valid_to) return resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', `${endpoint.host}:${endpoint.port} unavailable`, 'No peer certificate was returned.', 'Check TLS availability.'));
-      const expiry = new Date(cert.valid_to); const days = Math.floor((expiry - Date.now()) / 86400000); const evidence = { host: endpoint.host, port: endpoint.port, issuer: cert.issuer, valid_to: expiry.toISOString(), authorized, authorization_error: authError };
+      if (!cert.valid_to) return resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', `${endpoint.host}:${endpoint.port} unavailable`, 'No peer certificate was returned.', 'Check TLS availability.', evidence));
+      const expiry = new Date(cert.valid_to); const days = Math.floor((expiry - Date.now()) / 86400000); Object.assign(evidence, { issuer: cert.issuer, valid_to: expiry.toISOString(), authorized, authorization_error: authError });
       if (!authorized) return resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', 'Certificate not trusted', String(authError), 'Install a publicly trusted certificate for this hostname.', evidence));
       const status = days < 14 ? 'critical' : days < 30 ? 'warning' : 'healthy'; resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', status, `${days} days remaining`, `${endpoint.host}:${endpoint.port} presents a trusted certificate.`, days < 30 ? 'Confirm renewal is scheduled and working.' : 'No action required.', evidence));
     });
-    socket.on('timeout', () => { socket.destroy(); resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', 'Connection timed out', `${endpoint.host}:${endpoint.port} did not respond.`, 'Check routing and service availability.')); });
-    socket.on('error', error => resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', 'Connection failed', error.message, 'Check routing and TLS service availability.')));
+    socket.on('timeout', () => { socket.destroy(); resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', 'Connection timed out', `${endpoint.host}:${endpoint.port} did not respond.`, 'Check routing and service availability.', evidence)); });
+    socket.on('error', error => resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', 'Connection failed', error.message, 'Check routing and TLS service availability.', evidence)));
   });
 }
 
 async function dkim(domain, selectors) {
-  if (!selectors.length) return result('dkim', 'DKIM', 'warning', 'No selectors configured', 'Selectors cannot be discovered reliably from DNS.', 'Set DKIM_SELECTORS for this domain.');
+  if (!selectors.length) return result('dkim', 'DKIM', 'warning', 'No selectors configured', 'Selectors cannot be discovered reliably from DNS.', 'Add the active selectors for this domain in Settings.');
   const keys = [];
   for (const selector of selectors) {
     try {
@@ -162,7 +242,7 @@ function osRequest(config, endpoint, method = 'GET', body = null) {
   const url = new URL(`${config.url.replace(/\/$/, '')}/${config.index}/${endpoint}`); const payload = body === null ? null : Buffer.from(JSON.stringify(body)); const auth = Buffer.from(`${config.username}:${config.password}`).toString('base64');
   return new Promise((resolve, reject) => {
     const headers = { authorization: `Basic ${auth}`, accept: 'application/json' }; if (payload) { headers['content-type'] = 'application/json'; headers['content-length'] = payload.length; }
-    const req = (url.protocol === 'https:' ? https : http).request(url, { method, timeout: TIMEOUT, rejectUnauthorized: config.verify_tls, headers }, res => {
+    const req = (url.protocol === 'https:' ? https : http).request(url, { method, timeout: requestTimeoutMs, rejectUnauthorized: config.verify_tls, headers }, res => {
       const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => { try { const data = JSON.parse(Buffer.concat(chunks)); const reason = data.error?.root_cause?.[0]?.reason || data.error?.caused_by?.reason || data.error?.reason; res.statusCode < 300 ? resolve(data) : reject(new Error(reason || `OpenSearch HTTP ${res.statusCode}`)); } catch (e) { reject(e); } });
     }); req.on('timeout', () => req.destroy(new Error('OpenSearch timed out'))); req.on('error', reject); req.end(payload || undefined);
   });
@@ -183,7 +263,7 @@ async function sourceAggregationField(config) {
 }
 
 async function reports(domain, config, days) {
-  if (!config.enabled) return result('dmarc_reports', 'DMARC reports', 'info', 'OpenSearch disabled', 'DNS posture is monitored, but parsedmarc aggregate results are not connected.', 'Set OPENSEARCH_ENABLED=true and supply the connection variables to add observed authentication results.');
+  if (!config.enabled) return result('dmarc_reports', 'DMARC reports', 'info', 'OpenSearch disabled', 'DNS posture is monitored, but parsedmarc aggregate results are not connected.', 'Enable OpenSearch in Settings and supply the connection variables to add observed authentication results.');
   try {
     const sourceField = await sourceAggregationField(config);
     const failedAggregations = { total: { sum: { field: 'message_count' } } };
@@ -198,19 +278,29 @@ async function reports(domain, config, days) {
 function summarize(domain, checks) { const rank = { healthy: 0, info: 1, warning: 2, critical: 3 }; return { domain, status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'), checks, counts: { critical: checks.filter(v => v.status === 'critical').length, warning: checks.filter(v => v.status === 'warning').length, healthy: checks.filter(v => v.status === 'healthy').length } }; }
 async function checkDomain(entry, config) {
   const dm = await dmarc(entry.domain); const [sts, tlsreport, brand, keys, aggregate, ...certs] = await Promise.all([mtaSts(entry.domain), tlsRpt(entry.domain), bimi(entry.domain, dm), dkim(entry.domain, entry.dkim_selectors), reports(entry.domain, config.opensearch, entry.report_days), ...entry.tls_endpoints.map(certificate)]);
-  if (!certs.length) certs.push(result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Set TLS_ENDPOINTS for this domain.'));
-  return summarize(entry.domain, [dm, aggregate, sts, tlsreport, brand, ...certs, keys]);
+  if (!certs.length) certs.push(result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
+  return summarize(entry.domain, [dm, aggregate, keys, sts, tlsreport, ...certs, brand]);
 }
-function demo() { return summarize('example.com', [result('dmarc','DMARC','warning','quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,246 messages failed in 7 days.','Review the top failing sources.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('bimi','BIMI','warning','Self-asserted logo','No mark certificate is published.','Consider a VMC or CMC.'), result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.'), result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.')]); }
+function demo() { return summarize('example.com', [result('dmarc','DMARC','warning','quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,246 messages failed in 7 days.','Review the top failing sources.'), result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','Reports enabled','SMTP TLS failures have a report destination.','Review TLS reports.'), result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465}), result('bimi','BIMI','warning','Self-asserted logo','No mark certificate is published.','Consider a VMC or CMC.')]); }
 
 async function refresh() {
   if (activeRefresh) return activeRefresh; snapshot.refreshing = true;
-  activeRefresh = (async () => { try { const config = process.env.DEMO_MODE === 'true' ? null : envConfig(); const domains = config ? await Promise.all(config.domains.map(v => checkDomain(v, config))) : [demo()]; snapshot = { generated_at: new Date().toISOString(), refreshing: false, domains, summary: { critical: domains.reduce((n,d)=>n+d.counts.critical,0), warning: domains.reduce((n,d)=>n+d.counts.warning,0), healthy: domains.reduce((n,d)=>n+d.counts.healthy,0) } }; } catch (error) { snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message }; } finally { activeRefresh = null; } return snapshot; })(); return activeRefresh;
+  activeRefresh = (async () => { try { const config = process.env.DEMO_MODE === 'true' ? null : settingsConfig(); const domains = config ? await Promise.all(config.domains.map(v => checkDomain(v, config))) : [demo()]; snapshot = { generated_at: new Date().toISOString(), refreshing: false, configuration_required: !domains.length, domains, summary: { critical: domains.reduce((n,d)=>n+d.counts.critical,0), warning: domains.reduce((n,d)=>n+d.counts.warning,0), healthy: domains.reduce((n,d)=>n+d.counts.healthy,0) } }; } catch (error) { snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message }; } finally { activeRefresh = null; } return snapshot; })(); return activeRefresh;
 }
 
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(body); }
-function staticFile(req, res) { const name = req.url === '/' ? 'index.html' : req.url.split('?')[0].replace(/^\//, ''); const file = path.normalize(path.join(PUBLIC, name)); if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); } fs.readFile(file, (e, data) => { if (e) { res.writeHead(404); return res.end(); } const type = { '.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8' }[path.extname(file)] || 'application/octet-stream'; res.writeHead(200, { 'content-type': type, 'x-content-type-options':'nosniff' }); res.end(data); }); }
-const server = http.createServer(async (req,res) => { if (req.url === '/healthz') return json(res, snapshot.error ? 503 : 200, { ok: !snapshot.error, uptime_seconds: Math.floor((Date.now()-startedAt)/1000) }); if (req.url === '/api/status' && req.method === 'GET') return json(res,200,snapshot); if (req.url === '/api/refresh' && req.method === 'POST') return json(res,202,await refresh()); staticFile(req,res); });
-function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); refresh(); setInterval(refresh,Math.max(1,REFRESH_MINUTES)*60000).unref(); }); }
+function requestJson(req, maxBytes = 65536) { return new Promise((resolve, reject) => { const chunks = []; let size = 0; req.on('data', chunk => { size += chunk.length; if (size > maxBytes) { reject(new Error('Settings request is too large')); req.destroy(); } else chunks.push(chunk); }); req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (_) { reject(new Error('Settings must be valid JSON')); } }); req.on('error', reject); }); }
+function staticFile(req, res) { const pathname = req.url.split('?')[0]; const name = pathname === '/' || pathname === '/settings' ? 'index.html' : pathname.replace(/^\//, ''); const file = path.normalize(path.join(PUBLIC, name)); if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); } fs.readFile(file, (e, data) => { if (e) { res.writeHead(404); return res.end(); } const type = { '.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8' }[path.extname(file)] || 'application/octet-stream'; res.writeHead(200, { 'content-type': type, 'x-content-type-options':'nosniff' }); res.end(data); }); }
+function scheduleRefresh(minutes) { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = setInterval(refresh, Math.max(1, minutes) * 60000); refreshTimer.unref(); }
+const server = http.createServer(async (req,res) => {
+  const pathname = req.url.split('?')[0];
+  if (pathname === '/healthz') return json(res, snapshot.error ? 503 : 200, { ok: !snapshot.error, uptime_seconds: Math.floor((Date.now()-startedAt)/1000) });
+  if (pathname === '/api/status' && req.method === 'GET') return json(res,200,snapshot);
+  if (pathname === '/api/refresh' && req.method === 'POST') return json(res,202,await refresh());
+  if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, getSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }
+  if (pathname === '/api/settings' && req.method === 'PUT') { try { const settings = await saveSettings(await requestJson(req)); if (activeRefresh) await activeRefresh; await refresh(); return json(res, 200, settings); } catch (error) { return json(res, 400, { error: error.message }); } }
+  staticFile(req,res);
+});
+function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, tags, policyFile, mxMatch, selectSourceField, summarize, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarize, refresh, getSnapshot:()=>snapshot };
