@@ -7,12 +7,14 @@ const dns = require('dns').promises;
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { version: PACKAGE_VERSION } = require('./package.json');
 
 const PORT = Number(process.env.PORT || 8080);
+const APP_VERSION = process.env.APP_VERSION || PACKAGE_VERSION;
 const SETTINGS_PATH = process.env.SETTINGS_PATH || '/data/settings.json';
 const PUBLIC = path.join(__dirname, 'public');
 const startedAt = Date.now();
-let snapshot = { generated_at: null, refreshing: false, domains: [], summary: { critical: 0, warning: 0, healthy: 0 } };
+let snapshot = { version: APP_VERSION, generated_at: null, refreshing: false, domains: [], summary: { critical: 0, warning: 0, healthy: 0 } };
 let activeRefresh = null;
 let runtimeSettings = null;
 let refreshTimer = null;
@@ -285,7 +287,7 @@ function demo() { return summarize('example.com', [result('dmarc','DMARC','warni
 
 async function refresh() {
   if (activeRefresh) return activeRefresh; snapshot.refreshing = true;
-  activeRefresh = (async () => { try { const config = process.env.DEMO_MODE === 'true' ? null : settingsConfig(); const domains = config ? await Promise.all(config.domains.map(v => checkDomain(v, config))) : [demo()]; snapshot = { generated_at: new Date().toISOString(), refreshing: false, configuration_required: !domains.length, domains, summary: { critical: domains.reduce((n,d)=>n+d.counts.critical,0), warning: domains.reduce((n,d)=>n+d.counts.warning,0), healthy: domains.reduce((n,d)=>n+d.counts.healthy,0) } }; } catch (error) { snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message }; } finally { activeRefresh = null; } return snapshot; })(); return activeRefresh;
+  activeRefresh = (async () => { try { const config = process.env.DEMO_MODE === 'true' ? null : settingsConfig(); const domains = config ? await Promise.all(config.domains.map(v => checkDomain(v, config))) : [demo()]; snapshot = { version: APP_VERSION, generated_at: new Date().toISOString(), refreshing: false, configuration_required: !domains.length, domains, summary: { critical: domains.reduce((n,d)=>n+d.counts.critical,0), warning: domains.reduce((n,d)=>n+d.counts.warning,0), healthy: domains.reduce((n,d)=>n+d.counts.healthy,0) } }; } catch (error) { snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message }; } finally { activeRefresh = null; } return snapshot; })(); return activeRefresh;
 }
 
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(body); }
@@ -294,7 +296,7 @@ function staticFile(req, res) { const pathname = req.url.split('?')[0]; const na
 function scheduleRefresh(minutes) { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = setInterval(refresh, Math.max(1, minutes) * 60000); refreshTimer.unref(); }
 const server = http.createServer(async (req,res) => {
   const pathname = req.url.split('?')[0];
-  if (pathname === '/healthz') return json(res, snapshot.error ? 503 : 200, { ok: !snapshot.error, uptime_seconds: Math.floor((Date.now()-startedAt)/1000) });
+  if (pathname === '/healthz') return json(res, snapshot.error ? 503 : 200, { ok: !snapshot.error, version: APP_VERSION, uptime_seconds: Math.floor((Date.now()-startedAt)/1000) });
   if (pathname === '/api/status' && req.method === 'GET') return json(res,200,snapshot);
   if (pathname === '/api/refresh' && req.method === 'POST') return json(res,202,await refresh());
   if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, getSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }

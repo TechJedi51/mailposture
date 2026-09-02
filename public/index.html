@@ -1,8 +1,70 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0a0f0e"><title>MailPosture</title><link rel="stylesheet" href="/styles.css"></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0a0f0e">
+  <title>MailPosture</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/settings.css">
+</head>
 <body>
-  <header><a class="brand" href="/"><b>M</b>MailPosture</a><div><span id="updated">Starting checks…</span><button id="refresh">Run checks</button></div></header>
-  <main><section id="hero" class="hero"></section><nav id="domains" aria-label="Domains"></nav><section id="attention" class="attention"></section><section class="matrix"><div class="heading"><div><small>Control matrix</small><h2>Everything at a glance</h2></div><p>Open a control for evidence and its next step.</p></div><div id="checks" class="checks"></div></section></main>
+  <header>
+    <a class="brand" href="/" data-route="/"><b>M</b><span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.3.0</small></span></a>
+    <nav class="topnav" aria-label="Primary navigation">
+      <a href="/" data-route="/">Status</a>
+      <a href="/settings" data-route="/settings">Settings</a>
+    </nav>
+    <div class="header-actions"><span id="updated">Starting checks…</span><button id="refresh">Run checks</button></div>
+  </header>
+
+  <main id="status-view">
+    <section id="hero" class="hero"></section>
+    <nav id="domains" aria-label="Domains"></nav>
+    <section id="attention" class="attention"></section>
+    <section class="matrix">
+      <div class="heading"><div><small>Control matrix</small><h2>Everything at a glance</h2></div><p>Open a control for evidence and its next step.</p></div>
+      <div id="checks" class="checks"></div>
+    </section>
+  </main>
+
+  <main id="settings-view" class="settings-view" hidden>
+    <section class="settings-intro">
+      <small>Runtime configuration</small>
+      <h1>Settings</h1>
+      <p>Changes are saved on this server and survive container updates. One setting per line keeps the configuration readable and portable.</p>
+    </section>
+    <form id="settings-form" class="settings-form">
+      <section class="settings-panel">
+        <div class="field wide">
+          <label for="monitored-domains">Monitored domains</label>
+          <p>One mail domain per line.</p>
+          <textarea id="monitored-domains" rows="5" placeholder="example.com&#10;example.net" required></textarea>
+        </div>
+        <div class="field wide">
+          <label for="dkim-selectors">DKIM selectors</label>
+          <p>One mapping per line: <code>domain=selector1|selector2</code></p>
+          <textarea id="dkim-selectors" rows="5" placeholder="example.com=selector1|selector2"></textarea>
+        </div>
+        <div class="field wide">
+          <label for="tls-endpoints">TLS certificate endpoints</label>
+          <p>One mapping per line: <code>domain=host:port|host:port</code></p>
+          <textarea id="tls-endpoints" rows="5" placeholder="example.com=mail.example.com:465|mta-sts.example.com:443"></textarea>
+        </div>
+      </section>
+      <section class="settings-panel compact-fields">
+        <div class="field"><label for="report-days">Report history (days)</label><input id="report-days" type="number" min="1" max="365" required></div>
+        <div class="field"><label for="refresh-minutes">Refresh interval (minutes)</label><input id="refresh-minutes" type="number" min="1" max="1440" required></div>
+        <div class="field"><label for="request-timeout">Request timeout (milliseconds)</label><input id="request-timeout" type="number" min="1000" max="60000" step="100" required></div>
+        <label class="toggle"><input id="opensearch-enabled" type="checkbox"><span>Use OpenSearch DMARC reports</span></label>
+        <p class="settings-note">The OpenSearch address and credentials remain deployment environment variables so secrets are not stored in this file.</p>
+      </section>
+      <div class="settings-actions"><span id="settings-message" role="status"></span><button type="submit">Save settings</button></div>
+    </form>
+  </main>
+
   <dialog id="dialog"><button class="close" aria-label="Close">×</button><div id="detail"></div></dialog>
-  <footer><span>MailPosture</span><span>Read-only checks · cached locally</span></footer><script src="/app.js" defer></script>
-</body></html>
+  <footer><span>MailPosture</span><span>Read-only checks · settings stored locally</span></footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>
