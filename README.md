@@ -17,38 +17,30 @@ mailposture/
 
 No host bind mount is required. Docker stores `/data/settings.json` in the `mailposture_data` named volume so image updates do not erase it.
 
+## Interface
+
+- **Dashboard** shows the organization-wide score, a score for each domain, and open issues grouped by domain.
+- **Domains** shows the detailed status, attention queue, evidence, and control matrix for one domain at a time.
+- **Settings** manages domains, per-domain DKIM selectors and TLS certificate endpoints, monitoring intervals, OpenSearch reporting, and Light, Dark, or System appearance.
+- **Help** explains setup, every check, and the terminology used by the application.
+
 ## Settings screen
 
-After the first deployment, open **Settings** in MailPosture and enter the following values.
+After the first deployment, select the gear button in MailPosture.
 
 ### Domains
 
-Use one domain per line:
+Select the plus button to add a domain. Use the edit button beside a domain to change its name or manage its DKIM selectors and TLS certificate endpoints. Domain removal remains pending until **Save settings** is selected.
 
-```text
-example.com
-example.net
-```
+Add every domain that appears after the `@` in an organization-managed From address.
 
 ### DKIM selectors
 
-Use one domain mapping per line and vertical bars between selectors:
-
-```text
-example.com=selector1|selector2
-example.net=google|s1
-```
-
-An omitted domain receives a visible “No selectors configured” warning. DKIM selectors cannot be discovered reliably from DNS.
+Edit a domain, then add each active selector by its label, such as `selector1` or `google`. An omitted domain receives a visible “No selectors configured” warning. DKIM selectors cannot be discovered reliably from DNS.
 
 ### TLS certificate endpoints
 
-Use the same line-based mapping format. Each endpoint is `hostname:port`:
-
-```text
-example.com=mta-sts.example.com:443|mail.example.com:465
-example.net=www.example.net:443
-```
+Edit a domain, then add each endpoint as a host and port, such as `mta-sts.example.com` on port `443` or `mail.example.com` on port `465`.
 
 Direct TLS endpoints such as HTTPS 443, SMTP 465, and IMAP 993 are supported. SMTP STARTTLS on ports 25 and 587 is not currently probed.
 
@@ -170,7 +162,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Open MailPosture, choose **Settings**, add the monitored domains and mappings, then save. The settings are stored in the named volume rather than `.env`.
+Open MailPosture, select the gear button, add the monitored domains and their selectors and endpoints, then save. The settings are stored in the named volume rather than `.env`. Appearance preference is stored in the browser because it is specific to each device.
 
 `.env` is excluded by `.gitignore`. It must never be committed.
 

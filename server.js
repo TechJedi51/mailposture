@@ -159,7 +159,7 @@ async function dmarc(domain) {
 
 function get(url, maxBytes = 1048576) {
   return new Promise((resolve, reject) => {
-    const req = (url.startsWith('https:') ? https : http).get(url, { timeout: requestTimeoutMs, headers: { 'user-agent': 'MailPosture/0.3.0' } }, res => {
+    const req = (url.startsWith('https:') ? https : http).get(url, { timeout: requestTimeoutMs, headers: { 'user-agent': `MailPosture/${APP_VERSION}` } }, res => {
       const chunks = []; let size = 0;
       res.on('data', c => { size += c.length; if (size > maxBytes) req.destroy(new Error('Response is too large')); else chunks.push(c); });
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
@@ -292,7 +292,7 @@ async function refresh() {
 
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(body); }
 function requestJson(req, maxBytes = 65536) { return new Promise((resolve, reject) => { const chunks = []; let size = 0; req.on('data', chunk => { size += chunk.length; if (size > maxBytes) { reject(new Error('Settings request is too large')); req.destroy(); } else chunks.push(chunk); }); req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (_) { reject(new Error('Settings must be valid JSON')); } }); req.on('error', reject); }); }
-function staticFile(req, res) { const pathname = req.url.split('?')[0]; const name = pathname === '/' || pathname === '/settings' ? 'index.html' : pathname.replace(/^\//, ''); const file = path.normalize(path.join(PUBLIC, name)); if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); } fs.readFile(file, (e, data) => { if (e) { res.writeHead(404); return res.end(); } const type = { '.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8' }[path.extname(file)] || 'application/octet-stream'; res.writeHead(200, { 'content-type': type, 'x-content-type-options':'nosniff' }); res.end(data); }); }
+function staticFile(req, res) { const pathname = req.url.split('?')[0]; const name = ['/', '/domains', '/settings', '/help'].includes(pathname) ? 'index.html' : pathname.replace(/^\//, ''); const file = path.normalize(path.join(PUBLIC, name)); if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); } fs.readFile(file, (e, data) => { if (e) { res.writeHead(404); return res.end(); } const type = { '.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml' }[path.extname(file)] || 'application/octet-stream'; res.writeHead(200, { 'content-type': type, 'x-content-type-options':'nosniff' }); res.end(data); }); }
 function scheduleRefresh(minutes) { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = setInterval(refresh, Math.max(1, minutes) * 60000); refreshTimer.unref(); }
 const server = http.createServer(async (req,res) => {
   const pathname = req.url.split('?')[0];

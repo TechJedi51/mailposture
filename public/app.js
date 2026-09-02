@@ -1,9 +1,11 @@
 'use strict';
 
 const $ = selector => document.querySelector(selector);
-const state = { data: null, selected: 0, settingsLoaded: false };
+const state = { data: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/' };
 const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info' };
+const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
+const clone = value => JSON.parse(JSON.stringify(value));
 
 function ago(value) {
   if (!value) return 'Starting checks…';
@@ -13,7 +15,11 @@ function ago(value) {
 
 function score(domain) {
   const weights = { critical: 0, warning: .55, info: .8, healthy: 1 };
-  return Math.round(domain.checks.reduce((total, check) => total + weights[check.status], 0) / domain.checks.length * 100);
+  return domain.checks.length ? Math.round(domain.checks.reduce((total, check) => total + weights[check.status], 0) / domain.checks.length * 100) : 0;
+}
+
+function issuesFor(domain) {
+  return domain.checks.filter(check => ['critical', 'warning'].includes(check.status)).sort((a, b) => (a.status === b.status ? 0 : a.status === 'critical' ? -1 : 1));
 }
 
 function tlsEndpoint(check, domain) {
@@ -21,9 +27,51 @@ function tlsEndpoint(check, domain) {
   return `${check.evidence?.host || domain}:${check.evidence?.port || '—'}`;
 }
 
-function render() {
+function setTheme(mode, persist = true) {
+  const normalized = ['light', 'dark', 'system'].includes(mode) ? mode : 'system';
+  const resolved = normalized === 'system' ? (themeQuery.matches ? 'dark' : 'light') : normalized;
+  document.documentElement.dataset.themeMode = normalized;
+  document.documentElement.dataset.theme = resolved;
+  document.querySelector('meta[name="theme-color"]').content = resolved === 'dark' ? '#0a0f0e' : '#f3f7f5';
+  if (persist) localStorage.setItem('mailposture-theme', normalized);
+  document.querySelectorAll('input[name="theme"]').forEach(input => { input.checked = input.value === normalized; });
+}
+
+function renderDashboard() {
   const data = state.data;
-  $('#version').textContent = `v${data.version || 'unknown'}`;
+  if (!data) return;
+  if (data.error && !data.domains.length) {
+    $('#master-score').innerHTML = '<span>Unavailable</span>';
+    $('#domain-scores').innerHTML = `<div class="error">${esc(data.error)}</div>`;
+    $('#master-attention').innerHTML = '';
+    return;
+  }
+  if (!data.domains.length) {
+    $('#master-score').innerHTML = '<strong>—</strong><span>No domains configured</span>';
+    $('#domain-scores').innerHTML = '<div class="empty-state"><h3>Add your first domain</h3><p>Configure a domain, its DKIM selectors, and its TLS certificate endpoints.</p><a href="/settings" data-route="/settings">Open Settings →</a></div>';
+    $('#master-attention').innerHTML = '<div class="clear">There are no domains to evaluate.</div>';
+    $('#master-issue-count').textContent = '0 open';
+    return;
+  }
+  const domainScores = data.domains.map(score);
+  const master = Math.round(domainScores.reduce((total, value) => total + value, 0) / domainScores.length);
+  const issueCount = data.domains.reduce((total, domain) => total + issuesFor(domain).length, 0);
+  $('#master-score').innerHTML = `<strong>${master}</strong><span>Master score out of 100</span><div class="bar"><i style="width:${master}%"></i></div>`;
+  $('#domain-scores').innerHTML = data.domains.map((domain, index) => {
+    const value = domainScores[index];
+    return `<button class="domain-score-card" data-open-domain="${index}"><div class="domain-score-top"><span><i class="dot ${domain.status}"></i>${esc(domain.domain)}</span><span class="state ${domain.status}">${names[domain.status]}</span></div><strong>${value}</strong><div class="bar"><i style="width:${value}%"></i></div><p>${domain.counts.critical} critical · ${domain.counts.warning} review</p></button>`;
+  }).join('');
+  $('#master-issue-count').textContent = issueCount ? `${issueCount} open` : 'Clear';
+  $('#master-attention').innerHTML = issueCount ? data.domains.map((domain, domainIndex) => {
+    const issues = issuesFor(domain);
+    if (!issues.length) return '';
+    return `<section class="attention-group"><div class="attention-group-heading"><h3>${esc(domain.domain)}</h3><button data-open-domain="${domainIndex}">View domain →</button></div>${issues.map(check => `<article class="issue ${check.status}"><span class="icon">${check.status === 'critical' ? '!' : '•'}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-dashboard-check="${esc(check.id)}" data-domain-index="${domainIndex}">View →</button></article>`).join('')}</section>`;
+  }).join('') : '<div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
+}
+
+function renderDomain() {
+  const data = state.data;
+  if (!data) return;
   $('#updated').textContent = ago(data.generated_at);
   if (data.error && !data.domains.length) {
     $('#hero').innerHTML = '<div><small>Configuration needed</small><h1>Check the saved settings.</h1></div>';
@@ -41,7 +89,7 @@ function render() {
   }
   if (state.selected >= data.domains.length) state.selected = 0;
   const domain = data.domains[state.selected];
-  const issues = domain.checks.filter(check => ['critical', 'warning'].includes(check.status)).sort((a, b) => (a.status === 'critical' ? -1 : 1) - (b.status === 'critical' ? -1 : 1));
+  const issues = issuesFor(domain);
   const posture = score(domain);
   $('#hero').innerHTML = `<div><small>${esc(domain.domain)} · Current posture</small><h1>${domain.counts.critical ? `${domain.counts.critical} issue${domain.counts.critical === 1 ? '' : 's'} need attention.` : domain.counts.warning ? 'Protected, with room to improve.' : 'Mail controls look solid.'}</h1><p>Live policy checks and observed authentication results, translated into the next useful action.</p></div><div class="score"><strong>${posture}</strong><span>Posture score out of 100</span><div class="bar"><i style="width:${posture}%"></i></div></div>`;
   $('#domains').innerHTML = data.domains.map((value, index) => `<button class="domain ${index === state.selected ? 'active' : ''}" data-domain="${index}"><i class="dot ${value.status}"></i>${esc(value.domain)}</button>`).join('');
@@ -52,69 +100,153 @@ function render() {
   }).join('');
 }
 
+function renderStatus() {
+  if (!state.data) return;
+  $('#version').textContent = `v${state.data.version || 'unknown'}`;
+  $('#updated').textContent = ago(state.data.generated_at);
+  renderDashboard();
+  renderDomain();
+}
+
 function detail(id) {
-  const domain = state.data.domains[state.selected];
-  const check = domain.checks.find(value => value.id === id);
+  const domain = state.data?.domains[state.selected];
+  const check = domain?.checks.find(value => value.id === id);
   if (!check) return;
   const endpoint = tlsEndpoint(check, domain.domain);
   $('#detail').innerHTML = `<div class="detail"><span class="state ${check.status}">${names[check.status]}</span><h2>${esc(check.label)}</h2><p class="detail-domain">${esc(domain.domain)}${endpoint ? ` · ${esc(endpoint)}` : ''}</p><p class="summary">${esc(check.summary)}</p><div class="block"><h3>What this means</h3><p>${esc(check.detail)}</p></div><div class="block action"><h3>Next action</h3><p>${esc(check.action)}</p></div>${Object.keys(check.evidence || {}).length ? `<div class="block"><h3>Evidence</h3><pre>${esc(JSON.stringify(check.evidence, null, 2))}</pre></div>` : ''}</div>`;
-  $('#dialog').showModal();
+  $('#detail-dialog').showModal();
 }
 
-async function load() {
+async function loadStatus() {
   try {
-    state.data = await fetch('/api/status', { cache: 'no-store' }).then(response => response.json());
-    render();
+    const response = await fetch('/api/status', { cache: 'no-store' });
+    state.data = await response.json();
+    renderStatus();
   } catch (error) {
+    $('#domain-scores').innerHTML = `<div class="error">${esc(error.message)}</div>`;
     $('#attention').innerHTML = `<div class="error">${esc(error.message)}</div>`;
   }
 }
 
-function mappingLines(mapping, formatter) {
-  return Object.entries(mapping || {}).map(([domain, values]) => `${domain}=${values.map(formatter).join('|')}`).join('\n');
-}
-
-function parseMappings(text, endpoint = false) {
-  const output = {};
-  for (const line of text.split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
-    const separator = line.indexOf('=');
-    if (separator < 1) throw new Error(`Invalid mapping: ${line}`);
-    const domain = line.slice(0, separator).trim().toLowerCase();
-    const values = line.slice(separator + 1).split('|').map(value => value.trim()).filter(Boolean);
-    output[domain] = endpoint ? values.map(value => {
-      const match = value.match(/^(.*?)(?::(\d+))?$/);
-      return { host: match[1], port: Number(match[2] || 443) };
-    }) : values;
-  }
-  return output;
+function renderSettingsDomains() {
+  const settings = state.settings;
+  if (!settings) return;
+  $('#settings-domain-list').innerHTML = settings.monitored_domains.length ? settings.monitored_domains.map((domain, index) => {
+    const selectors = settings.dkim_selectors[domain] || [];
+    const endpoints = settings.tls_endpoints[domain] || [];
+    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
+  }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
 
 async function loadSettings() {
   const response = await fetch('/api/settings', { cache: 'no-store' });
   const settings = await response.json();
   if (!response.ok) throw new Error(settings.error || 'Unable to load settings');
-  $('#monitored-domains').value = settings.monitored_domains.join('\n');
-  $('#dkim-selectors').value = mappingLines(settings.dkim_selectors, value => value);
-  $('#tls-endpoints').value = mappingLines(settings.tls_endpoints, value => `${value.host}:${value.port}`);
+  state.settings = clone(settings);
   $('#report-days').value = settings.report_days;
   $('#refresh-minutes').value = settings.refresh_minutes;
   $('#request-timeout').value = settings.request_timeout_ms;
   $('#opensearch-enabled').checked = settings.opensearch_enabled;
+  setTheme(localStorage.getItem('mailposture-theme') || 'system', false);
+  renderSettingsDomains();
   state.settingsLoaded = true;
+}
+
+function renderEditorLists() {
+  const editor = state.editor;
+  $('#selector-list').innerHTML = editor.selectors.length ? editor.selectors.map((selector, index) => `<div class="editable-row small-row"><code>${esc(selector)}</code><div class="row-actions"><button class="symbol-button" type="button" data-edit-selector="${index}" aria-label="Edit selector ${esc(selector)}" title="Edit selector">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-selector="${index}" aria-label="Remove selector ${esc(selector)}" title="Remove selector">−</button></div></div>`).join('') : '<p class="empty-inline">No selectors added.</p>';
+  $('#endpoint-list').innerHTML = editor.endpoints.length ? editor.endpoints.map((endpoint, index) => `<div class="editable-row small-row"><code>${esc(endpoint.host)}:${endpoint.port}</code><div class="row-actions"><button class="symbol-button" type="button" data-edit-endpoint="${index}" aria-label="Edit endpoint ${esc(endpoint.host)} port ${endpoint.port}" title="Edit endpoint">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-endpoint="${index}" aria-label="Remove endpoint ${esc(endpoint.host)} port ${endpoint.port}" title="Remove endpoint">−</button></div></div>`).join('') : '<p class="empty-inline">No TLS certificates added.</p>';
+}
+
+function openDomainEditor(index = null) {
+  const domain = index === null ? '' : state.settings.monitored_domains[index];
+  state.editor = {
+    index,
+    originalDomain: domain,
+    selectors: clone(state.settings.dkim_selectors[domain] || []),
+    endpoints: clone(state.settings.tls_endpoints[domain] || []),
+    editingSelector: null,
+    editingEndpoint: null
+  };
+  $('#domain-editor-title').textContent = index === null ? 'Add domain' : 'Edit domain';
+  $('#domain-name').value = domain;
+  $('#selector-input').value = '';
+  $('#selector-add').textContent = '＋';
+  $('#endpoint-host').value = '';
+  $('#endpoint-port').value = '443';
+  $('#endpoint-add').textContent = '＋';
+  $('#domain-message').textContent = '';
+  renderEditorLists();
+  $('#domain-dialog').showModal();
+}
+
+function addSelector() {
+  const selector = $('#selector-input').value.trim();
+  if (!/^[a-z0-9_-]{1,63}$/i.test(selector)) return showDomainError('Enter a valid selector using letters, numbers, hyphens, or underscores.');
+  const duplicate = state.editor.selectors.findIndex((value, index) => value.toLowerCase() === selector.toLowerCase() && index !== state.editor.editingSelector);
+  if (duplicate >= 0) return showDomainError('That selector is already listed.');
+  if (state.editor.editingSelector === null) state.editor.selectors.push(selector);
+  else state.editor.selectors[state.editor.editingSelector] = selector;
+  state.editor.editingSelector = null;
+  $('#selector-input').value = '';
+  $('#selector-add').textContent = '＋';
+  showDomainError('');
+  renderEditorLists();
+}
+
+function addEndpoint() {
+  const host = $('#endpoint-host').value.trim().toLowerCase().replace(/\.$/, '');
+  const port = Number($('#endpoint-port').value);
+  if (!/^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(host)) return showDomainError('Enter a valid TLS host name.');
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return showDomainError('Enter a TLS port between 1 and 65535.');
+  const duplicate = state.editor.endpoints.findIndex((value, index) => value.host === host && value.port === port && index !== state.editor.editingEndpoint);
+  if (duplicate >= 0) return showDomainError('That TLS endpoint is already listed.');
+  const endpoint = { host, port };
+  if (state.editor.editingEndpoint === null) state.editor.endpoints.push(endpoint);
+  else state.editor.endpoints[state.editor.editingEndpoint] = endpoint;
+  state.editor.editingEndpoint = null;
+  $('#endpoint-host').value = '';
+  $('#endpoint-port').value = '443';
+  $('#endpoint-add').textContent = '＋';
+  showDomainError('');
+  renderEditorLists();
+}
+
+function showDomainError(message) { $('#domain-message').textContent = message; }
+
+function saveDomain(event) {
+  event.preventDefault();
+  const domain = $('#domain-name').value.trim().toLowerCase().replace(/\.$/, '');
+  const valid = /^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(domain);
+  if (!valid) return showDomainError('Enter a valid domain name.');
+  const duplicate = state.settings.monitored_domains.findIndex((value, index) => value === domain && index !== state.editor.index);
+  if (duplicate >= 0) return showDomainError('That domain is already monitored.');
+  const oldDomain = state.editor.originalDomain;
+  if (state.editor.index === null) state.settings.monitored_domains.push(domain);
+  else state.settings.monitored_domains[state.editor.index] = domain;
+  if (oldDomain && oldDomain !== domain) {
+    delete state.settings.dkim_selectors[oldDomain];
+    delete state.settings.tls_endpoints[oldDomain];
+  }
+  state.settings.dkim_selectors[domain] = clone(state.editor.selectors);
+  state.settings.tls_endpoints[domain] = clone(state.editor.endpoints);
+  $('#domain-dialog').close();
+  renderSettingsDomains();
+  $('#settings-message').textContent = 'Domain changes are ready. Save settings to apply them.';
+  $('#settings-message').className = 'pending';
 }
 
 async function saveSettings(event) {
   event.preventDefault();
   const button = $('#settings-form button[type="submit"]');
   const message = $('#settings-message');
+  if (!state.settings?.monitored_domains.length) { message.textContent = 'Add at least one monitored domain.'; message.className = 'failure'; return; }
   button.disabled = true;
   button.textContent = 'Saving…';
   message.className = '';
   try {
     const body = {
-      monitored_domains: $('#monitored-domains').value.split(/\r?\n|,/).map(value => value.trim()).filter(Boolean),
-      dkim_selectors: parseMappings($('#dkim-selectors').value),
-      tls_endpoints: parseMappings($('#tls-endpoints').value, true),
+      ...state.settings,
       report_days: Number($('#report-days').value),
       refresh_minutes: Number($('#refresh-minutes').value),
       request_timeout_ms: Number($('#request-timeout').value),
@@ -123,9 +255,11 @@ async function saveSettings(event) {
     const response = await fetch('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Unable to save settings');
+    state.settings = clone(result);
     message.textContent = 'Settings saved. Checks have been refreshed.';
     message.className = 'success';
-    await load();
+    renderSettingsDomains();
+    await loadStatus();
   } catch (error) {
     message.textContent = error.message;
     message.className = 'failure';
@@ -135,40 +269,109 @@ async function saveSettings(event) {
   }
 }
 
+function normalizedRoute(pathname) {
+  return ['/', '/domains', '/settings', '/help'].includes(pathname) ? pathname : '/';
+}
+
 async function showRoute(pathname, push = false) {
-  const settings = pathname === '/settings';
-  if (push) history.pushState({}, '', settings ? '/settings' : '/');
-  $('#status-view').hidden = settings;
-  $('#settings-view').hidden = !settings;
-  $('#refresh').hidden = settings;
-  $('#updated').hidden = settings;
-  document.querySelectorAll('[data-route]').forEach(link => link.classList.toggle('active', link.getAttribute('href') === (settings ? '/settings' : '/')));
-  if (settings && !state.settingsLoaded) {
+  const route = normalizedRoute(pathname);
+  state.route = route;
+  document.title = `${{ '/': 'Dashboard', '/domains': 'Domains', '/settings': 'Settings', '/help': 'Help' }[route]} · MailPosture`;
+  if (push) history.pushState({}, '', route);
+  const viewByRoute = { '/': '#dashboard-view', '/domains': '#domains-view', '/settings': '#settings-view', '/help': '#help-view' };
+  Object.values(viewByRoute).forEach(selector => { $(selector).hidden = selector !== viewByRoute[route]; });
+  const quiet = ['/settings', '/help'].includes(route);
+  $('#refresh').hidden = quiet;
+  $('#updated').hidden = quiet;
+  document.querySelectorAll('[data-route]').forEach(link => {
+    const active = link.getAttribute('href') === route;
+    link.classList.toggle('active', active);
+    if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
+  });
+  if (route === '/settings' && !state.settingsLoaded) {
     try { await loadSettings(); } catch (error) { $('#settings-message').textContent = error.message; $('#settings-message').className = 'failure'; }
   }
+  if (route === '/') renderDashboard();
+  if (route === '/domains') renderDomain();
 }
 
 $('#refresh').onclick = async () => {
   const button = $('#refresh');
   button.disabled = true;
   button.textContent = 'Checking…';
-  try { state.data = await fetch('/api/refresh', { method: 'POST' }).then(response => response.json()); render(); }
+  try { state.data = await fetch('/api/refresh', { method: 'POST' }).then(response => response.json()); renderStatus(); }
   finally { button.disabled = false; button.textContent = 'Run checks'; }
 };
 
 $('#settings-form').addEventListener('submit', saveSettings);
+$('#domain-form').addEventListener('submit', saveDomain);
+$('#add-domain').onclick = () => openDomainEditor();
+$('#selector-add').onclick = addSelector;
+$('#endpoint-add').onclick = addEndpoint;
+document.querySelectorAll('.domain-cancel').forEach(button => { button.onclick = () => $('#domain-dialog').close(); });
+document.querySelectorAll('input[name="theme"]').forEach(input => { input.onchange = () => setTheme(input.value); });
+themeQuery.addEventListener?.('change', () => { if ((localStorage.getItem('mailposture-theme') || 'system') === 'system') setTheme('system', false); });
+
 document.onclick = event => {
   const route = event.target.closest('[data-route]');
   if (route) { event.preventDefault(); showRoute(route.getAttribute('href'), true); return; }
+  const openDomain = event.target.closest('[data-open-domain]');
+  if (openDomain) { state.selected = Number(openDomain.dataset.openDomain); showRoute('/domains', true); return; }
   const domain = event.target.closest('[data-domain]');
-  if (domain) { state.selected = Number(domain.dataset.domain); render(); return; }
+  if (domain) { state.selected = Number(domain.dataset.domain); renderDomain(); return; }
+  const dashboardCheck = event.target.closest('[data-dashboard-check]');
+  if (dashboardCheck) { state.selected = Number(dashboardCheck.dataset.domainIndex); detail(dashboardCheck.dataset.dashboardCheck); return; }
   const check = event.target.closest('[data-check]');
-  if (check) detail(check.dataset.check);
+  if (check) { detail(check.dataset.check); return; }
+  if (event.target.closest('[data-add-domain]')) { openDomainEditor(); return; }
+  const editDomain = event.target.closest('[data-edit-domain]');
+  if (editDomain) { openDomainEditor(Number(editDomain.dataset.editDomain)); return; }
+  const removeDomain = event.target.closest('[data-remove-domain]');
+  if (removeDomain) {
+    const index = Number(removeDomain.dataset.removeDomain);
+    const removed = state.settings.monitored_domains.splice(index, 1)[0];
+    delete state.settings.dkim_selectors[removed];
+    delete state.settings.tls_endpoints[removed];
+    renderSettingsDomains();
+    $('#settings-message').textContent = `${removed} was removed. Save settings to apply this change.`;
+    $('#settings-message').className = 'pending';
+    return;
+  }
+  const editSelector = event.target.closest('[data-edit-selector]');
+  if (editSelector) {
+    const index = Number(editSelector.dataset.editSelector);
+    state.editor.editingSelector = index;
+    $('#selector-input').value = state.editor.selectors[index];
+    $('#selector-input').focus();
+    $('#selector-add').textContent = '✓';
+    return;
+  }
+  const removeSelector = event.target.closest('[data-remove-selector]');
+  if (removeSelector) { state.editor.selectors.splice(Number(removeSelector.dataset.removeSelector), 1); state.editor.editingSelector = null; $('#selector-input').value = ''; $('#selector-add').textContent = '＋'; renderEditorLists(); return; }
+  const editEndpoint = event.target.closest('[data-edit-endpoint]');
+  if (editEndpoint) {
+    const index = Number(editEndpoint.dataset.editEndpoint);
+    const endpoint = state.editor.endpoints[index];
+    state.editor.editingEndpoint = index;
+    $('#endpoint-host').value = endpoint.host;
+    $('#endpoint-port').value = endpoint.port;
+    $('#endpoint-host').focus();
+    $('#endpoint-add').textContent = '✓';
+    return;
+  }
+  const removeEndpoint = event.target.closest('[data-remove-endpoint]');
+  if (removeEndpoint) { state.editor.endpoints.splice(Number(removeEndpoint.dataset.removeEndpoint), 1); state.editor.editingEndpoint = null; $('#endpoint-host').value = ''; $('#endpoint-port').value = '443'; $('#endpoint-add').textContent = '＋'; renderEditorLists(); }
 };
-window.onpopstate = () => showRoute(location.pathname);
-$('.close').onclick = () => $('#dialog').close();
-$('#dialog').onclick = event => { if (event.target === $('#dialog')) $('#dialog').close(); };
 
+window.onpopstate = () => showRoute(location.pathname);
+$('#detail-dialog .close').onclick = () => $('#detail-dialog').close();
+$('#detail-dialog').onclick = event => { if (event.target === $('#detail-dialog')) $('#detail-dialog').close(); };
+$('#domain-dialog').onclick = event => { if (event.target === $('#domain-dialog')) $('#domain-dialog').close(); };
+$('#selector-input').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addSelector(); } };
+$('#endpoint-host').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addEndpoint(); } };
+$('#endpoint-port').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addEndpoint(); } };
+
+setTheme(localStorage.getItem('mailposture-theme') || 'system', false);
 showRoute(location.pathname);
-load();
+loadStatus();
 setInterval(() => { if (state.data) $('#updated').textContent = ago(state.data.generated_at); }, 15000);

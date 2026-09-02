@@ -19,11 +19,21 @@ async function run(){
   assert.strictEqual(app.mxMatch('mx1.example.com','*.example.com'),true);
   assert.strictEqual(app.selectSourceField({source_ip_address:{text:{aggregatable:false}},'source_ip_address.keyword':{keyword:{aggregatable:true}}}),'source_ip_address.keyword');
   assert.strictEqual(app.selectSourceField({source_ip_address:{text:{aggregatable:false}}}),null);
-  process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,'0.3.0');
-  assert.match(fs.readFileSync('public/index.html','utf8'),/MailPosture/);
-  assert.match(fs.readFileSync('public/index.html','utf8'),/Settings/);
-  assert.match(fs.readFileSync('public/index.html','utf8'),/id="version"/);
-  assert.match(fs.readFileSync('public/app.js','utf8'),/card-context/);
+  process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);
+  const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),icon=fs.readFileSync('public/mailposture.svg','utf8');
+  assert.match(page,/MailPosture/);
+  assert.match(page,/id="dashboard-view"/);
+  assert.match(page,/id="settings-view"/);
+  assert.match(page,/id="help-view"/);
+  assert.match(page,/id="domain-dialog"/);
+  assert.match(page,/name="theme" value="system"/);
+  assert.match(page,/aria-label="Settings"/);
+  assert.match(page,/id="version"/);
+  assert.match(client,/card-context/);
+  assert.match(client,/renderDashboard/);
+  assert.match(client,/renderSettingsDomains/);
+  assert.match(icon,/<svg/);
+  assert.match(icon,/check mark/i);
   console.log('All MailPosture checks passed.');
 }
 run().catch(e=>{console.error(e);process.exitCode=1});

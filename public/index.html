@@ -5,20 +5,52 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#0a0f0e">
   <title>MailPosture</title>
+  <link rel="icon" href="/mailposture.svg" type="image/svg+xml">
+  <script>
+    (() => {
+      const mode = localStorage.getItem('mailposture-theme') || 'system';
+      const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.themeMode = mode;
+      document.documentElement.dataset.theme = mode === 'system' ? (dark ? 'dark' : 'light') : mode;
+    })();
+  </script>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/settings.css">
 </head>
 <body>
   <header>
-    <a class="brand" href="/" data-route="/"><b>M</b><span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.3.0</small></span></a>
+    <a class="brand" href="/" data-route="/">
+      <img src="/mailposture.svg" alt="">
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.4.0</small></span>
+    </a>
     <nav class="topnav" aria-label="Primary navigation">
-      <a href="/" data-route="/">Status</a>
-      <a href="/settings" data-route="/settings">Settings</a>
+      <a href="/" data-route="/">Dashboard</a>
+      <a href="/domains" data-route="/domains">Domains</a>
     </nav>
-    <div class="header-actions"><span id="updated">Starting checks…</span><button id="refresh">Run checks</button></div>
+    <div class="header-actions">
+      <span id="updated">Starting checks…</span>
+      <button id="refresh">Run checks</button>
+      <a class="symbol-button" href="/help" data-route="/help" aria-label="Help" title="Help">?</a>
+      <a class="symbol-button" href="/settings" data-route="/settings" aria-label="Settings" title="Settings">⚙</a>
+    </div>
   </header>
 
-  <main id="status-view">
+  <main id="dashboard-view" hidden>
+    <section class="page-intro dashboard-intro">
+      <div><small>Organization overview</small><h1>Mail security dashboard</h1><p>One view of posture, domain health, and every issue that needs attention.</p></div>
+      <div id="master-score" class="score master-score"></div>
+    </section>
+    <section class="overview-section">
+      <div class="heading"><div><small>Domain scores</small><h2>Posture by domain</h2></div><p>Select a domain for its full control matrix.</p></div>
+      <div id="domain-scores" class="domain-scores"></div>
+    </section>
+    <section class="overview-section dashboard-attention">
+      <div class="heading"><div><small>Attention</small><h2>Open issues by domain</h2></div><span id="master-issue-count" class="pill"></span></div>
+      <div id="master-attention" class="attention-groups"></div>
+    </section>
+  </main>
+
+  <main id="domains-view" hidden>
     <section id="hero" class="hero"></section>
     <nav id="domains" aria-label="Domains"></nav>
     <section id="attention" class="attention"></section>
@@ -29,30 +61,28 @@
   </main>
 
   <main id="settings-view" class="settings-view" hidden>
-    <section class="settings-intro">
+    <section class="page-intro">
       <small>Runtime configuration</small>
       <h1>Settings</h1>
-      <p>Changes are saved on this server and survive container updates. One setting per line keeps the configuration readable and portable.</p>
+      <p>Manage domains and monitoring behavior. Changes are saved on this server and survive container updates.</p>
     </section>
     <form id="settings-form" class="settings-form">
-      <section class="settings-panel">
-        <div class="field wide">
-          <label for="monitored-domains">Monitored domains</label>
-          <p>One mail domain per line.</p>
-          <textarea id="monitored-domains" rows="5" placeholder="example.com&#10;example.net" required></textarea>
+      <section class="settings-panel domains-panel">
+        <div class="panel-heading">
+          <div><h2>Monitored domains</h2><p>Add each domain used in a From address. Select edit to manage its DKIM selectors and TLS certificates.</p></div>
+          <button class="symbol-button add-symbol" id="add-domain" type="button" aria-label="Add domain" title="Add domain">＋</button>
         </div>
-        <div class="field wide">
-          <label for="dkim-selectors">DKIM selectors</label>
-          <p>One mapping per line: <code>domain=selector1|selector2</code></p>
-          <textarea id="dkim-selectors" rows="5" placeholder="example.com=selector1|selector2"></textarea>
-        </div>
-        <div class="field wide">
-          <label for="tls-endpoints">TLS certificate endpoints</label>
-          <p>One mapping per line: <code>domain=host:port|host:port</code></p>
-          <textarea id="tls-endpoints" rows="5" placeholder="example.com=mail.example.com:465|mta-sts.example.com:443"></textarea>
-        </div>
+        <div id="settings-domain-list" class="editable-list"></div>
       </section>
-      <section class="settings-panel compact-fields">
+
+      <section class="settings-panel preferences-panel">
+        <div><h2>Appearance</h2><p>System follows this device’s appearance setting.</p></div>
+        <fieldset class="theme-picker">
+          <legend>Color mode</legend>
+          <label><input type="radio" name="theme" value="light"><span>☀ Light</span></label>
+          <label><input type="radio" name="theme" value="dark"><span>◐ Dark</span></label>
+          <label><input type="radio" name="theme" value="system"><span>◑ System</span></label>
+        </fieldset>
         <div class="field"><label for="report-days">Report history (days)</label><input id="report-days" type="number" min="1" max="365" required></div>
         <div class="field"><label for="refresh-minutes">Refresh interval (minutes)</label><input id="refresh-minutes" type="number" min="1" max="1440" required></div>
         <div class="field"><label for="request-timeout">Request timeout (milliseconds)</label><input id="request-timeout" type="number" min="1000" max="60000" step="100" required></div>
@@ -63,7 +93,70 @@
     </form>
   </main>
 
-  <dialog id="dialog"><button class="close" aria-label="Close">×</button><div id="detail"></div></dialog>
+  <main id="help-view" class="help-view" hidden>
+    <section class="page-intro">
+      <small>Guide and glossary</small>
+      <h1>Help</h1>
+      <p>MailPosture turns mail-security records and reports into a prioritized, read-only status view.</p>
+    </section>
+    <section class="help-section">
+      <h2>Getting started</h2>
+      <ol class="steps">
+        <li><strong>Add domains.</strong><span>Open Settings and add every domain that appears after the @ in your organization’s From addresses.</span></li>
+        <li><strong>Add selectors and endpoints.</strong><span>Edit each domain to add the DKIM selectors used by its senders and the TLS services whose certificates should be monitored.</span></li>
+        <li><strong>Review the dashboard.</strong><span>Start with the master score and attention list, then open a domain to inspect evidence and the next recommended action.</span></li>
+        <li><strong>Resolve and recheck.</strong><span>Make DNS or service changes outside MailPosture, allow them to propagate, then select Run checks.</span></li>
+      </ol>
+    </section>
+    <section class="help-section">
+      <div class="heading"><div><small>Checks</small><h2>What MailPosture evaluates</h2></div></div>
+      <div class="glossary-grid">
+        <article><h3>DMARC</h3><p>Checks whether the domain publishes one valid DMARC policy, its enforcement level, coverage percentage, and aggregate-report destination.</p></article>
+        <article><h3>DMARC reports</h3><p>Uses parsedmarc data in OpenSearch to show recent message volume, alignment rate, failures, and top failing sources when available.</p></article>
+        <article><h3>DKIM</h3><p>Checks each configured selector for a published public key and reports missing, revoked, or weak RSA keys. Selectors must be entered because DNS cannot reliably discover them.</p></article>
+        <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, and whether the policy covers every published MX host.</p></article>
+        <article><h3>TLS reporting</h3><p>Checks for a valid TLS-RPT record so other mail systems can report SMTP encryption and certificate failures.</p></article>
+        <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS on ports 25 and 587 is not currently tested.</p></article>
+        <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published.</p></article>
+      </div>
+    </section>
+    <section class="help-section">
+      <div class="heading"><div><small>Terms</small><h2>Glossary</h2></div></div>
+      <dl class="terms">
+        <div><dt>Alignment</dt><dd>The authenticated SPF or DKIM domain matches the domain visible in the message’s From address according to DMARC rules.</dd></div>
+        <div><dt>Selector</dt><dd>The label identifying a DKIM public key, such as <code>selector1._domainkey.example.com</code>.</dd></div>
+        <div><dt>Policy</dt><dd>DMARC uses none, quarantine, or reject. MTA-STS uses none, testing, or enforce.</dd></div>
+        <div><dt>RUA</dt><dd>The address that receives aggregate DMARC or TLS reports.</dd></div>
+        <div><dt>MX</dt><dd>A DNS record identifying the servers that receive email for a domain.</dd></div>
+        <div><dt>TLS endpoint</dt><dd>A host and port that presents a certificate directly, such as <code>mail.example.com:465</code>.</dd></div>
+        <div><dt>Posture score</dt><dd>A summary indicator weighted by control status. It helps prioritize work but does not replace the evidence shown for each check.</dd></div>
+      </dl>
+    </section>
+    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and optional OpenSearch report data. It does not change DNS, mail servers, messages, or OpenSearch records. Saving Settings changes only MailPosture’s local configuration.</p></section>
+  </main>
+
+  <dialog id="detail-dialog"><button class="close" type="button" aria-label="Close">×</button><div id="detail"></div></dialog>
+
+  <dialog id="domain-dialog" class="editor-dialog">
+    <form id="domain-form">
+      <button class="close domain-cancel" type="button" aria-label="Close">×</button>
+      <div class="editor-heading"><small>Domain configuration</small><h2 id="domain-editor-title">Add domain</h2></div>
+      <div class="field"><label for="domain-name">Domain name</label><input id="domain-name" type="text" placeholder="example.com" autocomplete="off" required></div>
+      <section class="editor-section">
+        <div><h3>DKIM selectors</h3><p>Add the selector labels used by this domain’s mail senders.</p></div>
+        <div id="selector-list" class="editable-list compact-list"></div>
+        <div class="inline-editor"><input id="selector-input" type="text" placeholder="selector1" aria-label="DKIM selector"><button id="selector-add" class="symbol-button" type="button" aria-label="Add DKIM selector" title="Add selector">＋</button></div>
+      </section>
+      <section class="editor-section">
+        <div><h3>TLS certificates</h3><p>Add every direct-TLS host and port whose certificate should be monitored.</p></div>
+        <div id="endpoint-list" class="editable-list compact-list"></div>
+        <div class="inline-editor endpoint-editor"><input id="endpoint-host" type="text" placeholder="mail.example.com" aria-label="TLS host"><input id="endpoint-port" type="number" min="1" max="65535" value="443" aria-label="TLS port"><button id="endpoint-add" class="symbol-button" type="button" aria-label="Add TLS endpoint" title="Add endpoint">＋</button></div>
+      </section>
+      <p id="domain-message" class="failure" role="alert"></p>
+      <div class="dialog-actions"><button class="secondary domain-cancel" type="button">Cancel</button><button type="submit">Save domain</button></div>
+    </form>
+  </dialog>
+
   <footer><span>MailPosture</span><span>Read-only checks · settings stored locally</span></footer>
   <script src="/app.js" defer></script>
 </body>
