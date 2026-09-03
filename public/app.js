@@ -1,12 +1,16 @@
 'use strict';
 
 const $ = selector => document.querySelector(selector);
-const state = { data: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/' };
+const state = { data: null, system: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/' };
 const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info' };
 const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
 const clone = value => JSON.parse(JSON.stringify(value));
 const number = value => new Intl.NumberFormat().format(Math.round(Number(value || 0)));
+
+function statusSymbol(status, label = names[status] || status) {
+  return `<span class="status-symbol ${esc(status)}" role="img" aria-label="${esc(label)}"></span>`;
+}
 
 function ago(value) {
   if (!value) return 'Starting checks…';
@@ -123,7 +127,7 @@ function renderDashboard() {
   $('#master-score').innerHTML = `<strong>${master}</strong><span>Master score out of 100</span><div class="bar"><i style="width:${master}%"></i></div>`;
   $('#domain-scores').innerHTML = data.domains.map((domain, index) => {
     const value = domainScores[index];
-    return `<button class="domain-score-card" data-open-domain="${index}"><div class="domain-score-top"><span><i class="dot ${domain.status}"></i>${esc(domain.domain)}</span><span class="state ${domain.status}">${names[domain.status]}</span></div><strong>${value}</strong><div class="bar"><i style="width:${value}%"></i></div><p>${domain.counts.critical} critical · ${domain.counts.warning} review</p></button>`;
+    return `<button class="domain-score-card" data-open-domain="${index}"><div class="domain-score-top"><span>${statusSymbol(domain.status)}${esc(domain.domain)}</span><span class="state ${domain.status}">${names[domain.status]}</span></div><strong>${value}</strong><div class="bar"><i style="width:${value}%"></i></div><p>${domain.counts.critical} critical · ${domain.counts.warning} review</p></button>`;
   }).join('');
   $('#master-issue-count').textContent = issueCount ? `${issueCount} open` : 'Clear';
   $('#master-attention').innerHTML = issueCount ? data.domains.map((domain, domainIndex) => {
@@ -160,7 +164,7 @@ function renderDomain() {
   const issues = issuesFor(domain);
   const posture = score(domain);
   $('#hero').innerHTML = `<div><small>${esc(domain.domain)} · Current posture</small><h1>${domain.counts.critical ? `${domain.counts.critical} issue${domain.counts.critical === 1 ? '' : 's'} need attention.` : domain.counts.warning ? 'Protected, with room to improve.' : 'Mail controls look solid.'}</h1><p>Live policy checks and observed authentication results, translated into the next useful action.</p></div><div class="score"><strong>${posture}</strong><span>Posture score out of 100</span><div class="bar"><i style="width:${posture}%"></i></div></div>`;
-  $('#domains').innerHTML = data.domains.map((value, index) => `<button class="domain ${index === state.selected ? 'active' : ''}" data-domain="${index}"><i class="dot ${value.status}"></i>${esc(value.domain)}</button>`).join('');
+  $('#domains').innerHTML = data.domains.map((value, index) => `<button class="domain ${index === state.selected ? 'active' : ''}" data-domain="${index}">${statusSymbol(value.status)}${esc(value.domain)}</button>`).join('');
   $('#attention').innerHTML = issues.length ? `<div class="attention-head"><h2>Attention queue</h2><span class="pill">${issues.length} open</span></div>${issues.map(check => `<article class="issue ${check.status}"><span class="icon">${check.status === 'critical' ? '!' : '•'}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-check="${esc(check.id)}">View →</button></article>`).join('')}` : '<div class="attention-head"><h2>Attention queue</h2><span class="pill">Clear</span></div><div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
   $('#checks').innerHTML = domain.checks.map(check => {
     const endpoint = tlsEndpoint(check, domain.domain);
@@ -175,6 +179,45 @@ function renderStatus() {
   $('#updated').textContent = ago(state.data.generated_at);
   renderDashboard();
   renderDomain();
+}
+
+function systemSettingsSection(id) {
+  if (id === 'opensearch' || id === 'report_indices') return 'opensearch';
+  if (id.startsWith('parsedmarc')) return 'parsedmarc';
+  return null;
+}
+
+function renderSystemStatus() {
+  const data = state.system;
+  if (!data) return;
+  const nav = $('#system-status-tab');
+  nav.classList.remove('system-healthy', 'system-warning', 'system-critical');
+  nav.classList.add(`system-${data.status || 'warning'}`);
+  nav.setAttribute('aria-label', `System Status: ${names[data.status] || 'Unavailable'}`);
+  $('#system-status-updated').textContent = data.checked_at ? `Checked ${new Date(data.checked_at).toLocaleString()}` : 'Check unavailable';
+  if (data.error) {
+    $('#system-status-summary').innerHTML = `${statusSymbol('critical')}<div><strong>Unavailable</strong><span>System checks could not be completed.</span></div>`;
+    $('#system-status-checks').innerHTML = `<div class="error">${esc(data.error)}</div>`;
+    return;
+  }
+  const status = data.status || 'warning';
+  const counts = (data.checks || []).reduce((totals, check) => ({ ...totals, [check.status]: (totals[check.status] || 0) + 1 }), {});
+  $('#system-status-summary').innerHTML = `${statusSymbol(status)}<div><strong>${names[status] || 'Unavailable'}</strong><span>${counts.critical || 0} need action · ${counts.warning || 0} review · ${counts.healthy || 0} healthy</span></div>`;
+  $('#system-status-checks').innerHTML = (data.checks || []).map(check => {
+    const section = systemSettingsSection(check.id);
+    return `<article class="system-status-card ${esc(check.status)}"><div class="system-status-card-heading">${statusSymbol(check.status)}<div><span class="state ${esc(check.status)}">${esc(names[check.status] || check.status)}</span><h3>${esc(check.label)}</h3></div></div><strong>${esc(check.summary)}</strong><p>${esc(check.detail)}</p>${check.status !== 'healthy' ? `<div class="system-action"><span>Next action</span><p>${esc(check.action)}</p>${section ? `<button type="button" data-system-settings="${section}">Open Settings →</button>` : ''}</div>` : ''}</article>`;
+  }).join('') || '<div class="clear">No system checks were returned.</div>';
+}
+
+async function loadSystemStatus() {
+  try {
+    const response = await fetch('/api/system-status', { cache: 'no-store' });
+    state.system = await response.json();
+    if (!response.ok && !state.system.error) state.system.error = 'System checks could not be completed.';
+  } catch (error) {
+    state.system = { status: 'critical', checks: [], error: error.message, checked_at: new Date().toISOString() };
+  }
+  renderSystemStatus();
 }
 
 function detail(id) {
@@ -499,15 +542,15 @@ async function saveSettings(event) {
 }
 
 function normalizedRoute(pathname) {
-  return ['/', '/domains', '/settings', '/help'].includes(pathname) ? pathname : '/';
+  return ['/', '/domains', '/status', '/settings', '/help'].includes(pathname) ? pathname : '/';
 }
 
 async function showRoute(pathname, push = false) {
   const route = normalizedRoute(pathname);
   state.route = route;
-  document.title = `${{ '/': 'Dashboard', '/domains': 'Domains', '/settings': 'Settings', '/help': 'Help' }[route]} · MailPosture`;
+  document.title = `${{ '/': 'Dashboard', '/domains': 'Domains', '/status': 'System Status', '/settings': 'Settings', '/help': 'Help' }[route]} · MailPosture`;
   if (push) history.pushState({}, '', route);
-  const viewByRoute = { '/': '#dashboard-view', '/domains': '#domains-view', '/settings': '#settings-view', '/help': '#help-view' };
+  const viewByRoute = { '/': '#dashboard-view', '/domains': '#domains-view', '/status': '#system-status-view', '/settings': '#settings-view', '/help': '#help-view' };
   Object.values(viewByRoute).forEach(selector => { $(selector).hidden = selector !== viewByRoute[route]; });
   const quiet = ['/settings', '/help'].includes(route);
   $('#refresh').hidden = quiet;
@@ -522,14 +565,22 @@ async function showRoute(pathname, push = false) {
   }
   if (route === '/') renderDashboard();
   if (route === '/domains') renderDomain();
+  if (route === '/status') await loadSystemStatus();
 }
 
 $('#refresh').onclick = async () => {
   const button = $('#refresh');
+  const label = button.querySelector('.toolbar-label');
   button.disabled = true;
-  button.textContent = 'Checking…';
-  try { state.data = await fetch('/api/refresh', { method: 'POST' }).then(response => response.json()); renderStatus(); }
-  finally { button.disabled = false; button.textContent = 'Run checks'; }
+  label.textContent = 'Checking…';
+  try {
+    state.data = await fetch('/api/refresh', { method: 'POST' }).then(response => response.json());
+    renderStatus();
+    await loadSystemStatus();
+  } finally {
+    button.disabled = false;
+    label.textContent = 'Run checks';
+  }
 };
 
 $('#settings-form').addEventListener('submit', saveSettings);
@@ -564,6 +615,8 @@ themeQuery.addEventListener?.('change', () => { if ((localStorage.getItem('mailp
 document.onclick = event => {
   const route = event.target.closest('[data-route]');
   if (route) { event.preventDefault(); showRoute(route.getAttribute('href'), true); return; }
+  const systemSettings = event.target.closest('[data-system-settings]');
+  if (systemSettings) { showRoute('/settings', true).then(() => selectSettingsTab(systemSettings.dataset.systemSettings)); return; }
   const reportLink = event.target.closest('[data-report-target]');
   if (reportLink) {
     event.preventDefault();
@@ -635,4 +688,5 @@ $('#endpoint-port').onkeydown = event => { if (event.key === 'Enter') { event.pr
 setTheme(localStorage.getItem('mailposture-theme') || 'system', false);
 showRoute(location.pathname);
 loadStatus();
+loadSystemStatus();
 setInterval(() => { if (state.data) $('#updated').textContent = ago(state.data.generated_at); }, 15000);

@@ -14,6 +14,7 @@ const APP_VERSION = process.env.APP_VERSION || PACKAGE_VERSION;
 const SETTINGS_PATH = process.env.SETTINGS_PATH || '/data/settings.json';
 const SECRETS_PATH = process.env.SECRETS_PATH || '/data/secrets.json';
 const PARSEDMARC_CONFIG_PATH = process.env.PARSEDMARC_CONFIG_PATH || '/data/parsedmarc/config.ini';
+const PARSEDMARC_STATUS_PATH = process.env.PARSEDMARC_STATUS_PATH || '/run/parsedmarc/status.json';
 const PUBLIC = path.join(__dirname, 'public');
 const startedAt = Date.now();
 let snapshot = { version: APP_VERSION, generated_at: null, refreshing: false, domains: [], summary: { critical: 0, warning: 0, healthy: 0 } };
@@ -329,6 +330,104 @@ function settingsConfig(settings = getSettings()) {
 function envConfig() { return settingsConfig(settingsFromEnv()); }
 
 function result(id, label, status, summary, detail, action, evidence = {}) { return { id, label, status, summary, detail, action, evidence }; }
+function overallStatus(checks) {
+  const rank = { healthy: 0, warning: 1, critical: 2 };
+  return checks.reduce((current, check) => rank[check.status] > rank[current] ? check.status : current, 'healthy');
+}
+
+function parsedmarcConfigurationStatus(settings, content, metadata = {}) {
+  if (settings.report_source !== 'standalone') return result('parsedmarc_config', 'ParseDMARC configuration', 'warning', 'Managed externally', 'MailPosture cannot verify the active configuration used by an external ParseDMARC service.', 'Confirm the external service mounts the generated configuration and reloads it after changes.');
+  if (!settings.mailbox.enabled) return result('parsedmarc_config', 'ParseDMARC configuration', 'warning', 'Collection disabled', 'The report mailbox is not enabled, so ParseDMARC is not expected to collect reports.', 'Enable report collection in Settings when you are ready to process the mailbox.');
+  const required = ['general', 'mailbox', 'imap', 'opensearch'];
+  const sections = new Set(String(content || '').split(/\r?\n/).map(line => line.match(/^\[([^\]]+)\]$/)?.[1]).filter(Boolean));
+  const missing = required.filter(section => !sections.has(section));
+  if (missing.length) return result('parsedmarc_config', 'ParseDMARC configuration', 'critical', 'Configuration incomplete', `The active configuration is missing: ${missing.join(', ')}.`, 'Save the ParseDMARC settings again and verify that MailPosture can write its data directory.', { path: PARSEDMARC_CONFIG_PATH, missing_sections: missing });
+  return result('parsedmarc_config', 'ParseDMARC configuration', 'healthy', 'Active configuration ready', 'The generated configuration contains the mailbox, IMAP, and OpenSearch sections required by ParseDMARC.', 'No action required.', { path: PARSEDMARC_CONFIG_PATH, updated_at: metadata.updated_at || null, size_bytes: metadata.size_bytes || Buffer.byteLength(content) });
+}
+
+async function readJsonFile(filename) {
+  return JSON.parse(await fs.promises.readFile(filename, 'utf8'));
+}
+
+async function systemStatus() {
+  const checkedAt = new Date().toISOString();
+  let settings;
+  try { settings = getSettings(); }
+  catch (error) {
+    const checks = [result('mailposture', 'MailPosture', 'critical', 'Settings unavailable', error.message, 'Verify the persistent data mount and settings file.')];
+    return { version: APP_VERSION, checked_at: checkedAt, status: 'critical', checks };
+  }
+
+  const checks = [];
+  const lastRefresh = snapshot.generated_at ? new Date(snapshot.generated_at).getTime() : 0;
+  const staleAfter = Math.max(2, settings.refresh_minutes * 2) * 60000;
+  const appStatus = snapshot.error ? 'critical' : (!lastRefresh || Date.now() - lastRefresh > staleAfter ? 'warning' : 'healthy');
+  checks.push(result('mailposture', 'MailPosture', appStatus, snapshot.error ? 'Checks failed' : appStatus === 'warning' ? 'Checks are stale' : 'Application checks running', snapshot.error || (lastRefresh ? `The most recent domain check completed ${Math.max(0, Math.floor((Date.now() - lastRefresh) / 60000))} minutes ago.` : 'The first domain check has not completed yet.'), appStatus === 'healthy' ? 'No action required.' : 'Run checks again and review the application logs if the condition remains.', { version: APP_VERSION, uptime_seconds: Math.floor((Date.now() - startedAt) / 1000), last_domain_check: snapshot.generated_at }));
+
+  try {
+    await Promise.all([
+      fs.promises.access(path.dirname(SETTINGS_PATH), fs.constants.R_OK | fs.constants.W_OK),
+      fs.promises.access(path.dirname(PARSEDMARC_CONFIG_PATH), fs.constants.R_OK | fs.constants.W_OK)
+    ]);
+    checks.push(result('storage', 'Settings storage', 'healthy', 'Persistent storage writable', 'MailPosture can read and write its settings and generated ParseDMARC configuration directories.', 'No action required.'));
+  } catch (error) {
+    checks.push(result('storage', 'Settings storage', 'critical', 'Storage is not writable', error.message, 'Correct ownership and permissions on the MailPosture data directories.', { settings_directory: path.dirname(SETTINGS_PATH), parsedmarc_directory: path.dirname(PARSEDMARC_CONFIG_PATH) }));
+  }
+
+  let configContent = '';
+  let configMetadata = {};
+  try {
+    configContent = await fs.promises.readFile(PARSEDMARC_CONFIG_PATH, 'utf8');
+    const stat = await fs.promises.stat(PARSEDMARC_CONFIG_PATH);
+    configMetadata = { updated_at: stat.mtime.toISOString(), size_bytes: stat.size };
+  } catch (_) {}
+  checks.push(parsedmarcConfigurationStatus(settings, configContent, configMetadata));
+
+  if (settings.report_source === 'standalone' && settings.mailbox.enabled) {
+    try {
+      const heartbeat = await readJsonFile(PARSEDMARC_STATUS_PATH);
+      const age = Date.now() - new Date(heartbeat.updated_at).getTime();
+      const fresh = Number.isFinite(age) && age < 45000;
+      const running = heartbeat.state === 'running';
+      const heartbeatStatus = fresh && running ? 'healthy' : heartbeat.state === 'error' || !fresh ? 'critical' : 'warning';
+      checks.push(result('parsedmarc_runtime', 'ParseDMARC service', heartbeatStatus, fresh && running ? 'Collector running' : fresh ? `Collector ${heartbeat.state || 'not ready'}` : 'Heartbeat is stale', fresh ? `The standalone supervisor last reported “${heartbeat.state || 'unknown'}”.` : 'MailPosture has not received a current heartbeat from the standalone ParseDMARC supervisor.', heartbeatStatus === 'healthy' ? 'No action required.' : 'Review the ParseDMARC container health and logs.', { heartbeat_at: heartbeat.updated_at || null, state: heartbeat.state || 'unknown', exit_code: heartbeat.exit_code ?? null }));
+    } catch (error) {
+      checks.push(result('parsedmarc_runtime', 'ParseDMARC service', 'warning', 'Runtime heartbeat unavailable', 'The configuration is available, but this deployment does not expose the optional ParseDMARC runtime heartbeat.', 'Add the ParseDMARC status volume from the current standalone Compose example, then redeploy the stack.', { expected_path: PARSEDMARC_STATUS_PATH }));
+    }
+  } else {
+    checks.push(result('parsedmarc_runtime', 'ParseDMARC service', 'warning', settings.mailbox.enabled ? 'External runtime not observable' : 'Collector not enabled', settings.mailbox.enabled ? 'MailPosture cannot directly observe an externally managed ParseDMARC process.' : 'ParseDMARC remains idle until report collection is enabled.', settings.mailbox.enabled ? 'Confirm the external service is running and writing reports to OpenSearch.' : 'Enable report collection in Settings when needed.'));
+  }
+
+  const osConfig = settingsConfig(settings).opensearch;
+  if (!osConfig.enabled) {
+    checks.push(result('opensearch', 'OpenSearch', 'warning', 'Report source disabled', 'MailPosture is running live domain checks without historical DMARC or SMTP TLS data.', 'Choose a bundled or external report source in Settings.'));
+  } else {
+    let connected = false;
+    try {
+      const cluster = await osApiRequest(osConfig, '_cluster/health');
+      connected = true;
+      const clusterStatus = cluster.status === 'red' ? 'critical' : cluster.status === 'yellow' ? 'warning' : 'healthy';
+      checks.push(result('opensearch', 'OpenSearch', clusterStatus, `Cluster ${cluster.status || 'unknown'}`, `Authenticated connection succeeded with ${cluster.number_of_nodes || 0} node${cluster.number_of_nodes === 1 ? '' : 's'} and ${cluster.unassigned_shards || 0} unassigned shards.`, clusterStatus === 'healthy' ? 'No action required.' : clusterStatus === 'warning' ? 'Review unassigned replicas; yellow is common on a single-node cluster when replicas are configured.' : 'Restore the unavailable primary shards before relying on report data.', { cluster_name: cluster.cluster_name, nodes: cluster.number_of_nodes, active_primary_shards: cluster.active_primary_shards, unassigned_shards: cluster.unassigned_shards }));
+    } catch (error) {
+      checks.push(result('opensearch', 'OpenSearch', 'critical', 'Connection failed', error.message, 'Verify the URL, credentials, network, TLS settings, and OpenSearch container health.'));
+    }
+    if (connected) {
+      const patterns = [
+        ['DMARC aggregate', settings.opensearch_aggregate_index],
+        ['DMARC failure', settings.opensearch_failure_index],
+        ['SMTP TLS', settings.opensearch_smtp_tls_index]
+      ];
+      const probes = await Promise.all(patterns.map(async ([label, index]) => {
+        try { const data = await osApiRequest(osConfig, `${index}/_count?ignore_unavailable=true&allow_no_indices=true`); return { label, index, count: data.count || 0, available: data._shards?.total > 0 }; }
+        catch (error) { return { label, index, count: 0, available: false, error: error.message }; }
+      }));
+      const unavailable = probes.filter(probe => !probe.available);
+      checks.push(result('report_indices', 'Report indexes', unavailable.length ? 'warning' : 'healthy', unavailable.length ? `${unavailable.length} index pattern${unavailable.length === 1 ? '' : 's'} unavailable` : 'Report indexes queryable', probes.map(probe => `${probe.label}: ${probe.available ? `${probe.count} documents` : 'not found'}`).join(' · '), unavailable.length ? 'Confirm ParseDMARC is configured to save these report types; an index appears after its first matching report.' : 'No action required.', { indexes: probes }));
+    }
+  }
+
+  return { version: APP_VERSION, checked_at: checkedAt, status: overallStatus(checks), checks };
+}
 function tags(record) {
   return Object.fromEntries(String(record || '').split(';').map(v => v.trim()).filter(Boolean).map(term => {
     const i = term.indexOf('='); return i < 0 ? [term.toLowerCase(), ''] : [term.slice(0, i).trim().toLowerCase(), term.slice(i + 1).trim()];
@@ -554,12 +653,13 @@ async function refresh() {
 
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(body); }
 function requestJson(req, maxBytes = 65536) { return new Promise((resolve, reject) => { const chunks = []; let size = 0; req.on('data', chunk => { size += chunk.length; if (size > maxBytes) { reject(new Error('Settings request is too large')); req.destroy(); } else chunks.push(chunk); }); req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (_) { reject(new Error('Settings must be valid JSON')); } }); req.on('error', reject); }); }
-function staticFile(req, res) { const pathname = req.url.split('?')[0]; const name = ['/', '/domains', '/settings', '/help'].includes(pathname) ? 'index.html' : pathname.replace(/^\//, ''); const file = path.normalize(path.join(PUBLIC, name)); if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); } fs.readFile(file, (e, data) => { if (e) { res.writeHead(404); return res.end(); } const type = { '.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml' }[path.extname(file)] || 'application/octet-stream'; res.writeHead(200, { 'content-type': type, 'x-content-type-options':'nosniff' }); res.end(data); }); }
+function staticFile(req, res) { const pathname = req.url.split('?')[0]; const name = ['/', '/domains', '/status', '/settings', '/help'].includes(pathname) ? 'index.html' : pathname.replace(/^\//, ''); const file = path.normalize(path.join(PUBLIC, name)); if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); } fs.readFile(file, (e, data) => { if (e) { res.writeHead(404); return res.end(); } const type = { '.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml' }[path.extname(file)] || 'application/octet-stream'; res.writeHead(200, { 'content-type': type, 'x-content-type-options':'nosniff' }); res.end(data); }); }
 function scheduleRefresh(minutes) { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = setInterval(refresh, Math.max(1, minutes) * 60000); refreshTimer.unref(); }
 const server = http.createServer(async (req,res) => {
   const pathname = req.url.split('?')[0];
   if (pathname === '/healthz') return json(res, snapshot.error ? 503 : 200, { ok: !snapshot.error, version: APP_VERSION, uptime_seconds: Math.floor((Date.now()-startedAt)/1000) });
   if (pathname === '/api/status' && req.method === 'GET') return json(res,200,snapshot);
+  if (pathname === '/api/system-status' && req.method === 'GET') { try { return json(res, 200, await systemStatus()); } catch (error) { return json(res, 500, { version: APP_VERSION, checked_at: new Date().toISOString(), status: 'critical', checks: [], error: error.message }); } }
   if (pathname === '/api/refresh' && req.method === 'POST') return json(res,202,await refresh());
   if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, publicSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }
   if (pathname === '/api/settings' && req.method === 'PUT') { try { const settings = await saveSettings(await requestJson(req)); if (activeRefresh) await activeRefresh; await refresh(); return json(res, 200, settings); } catch (error) { return json(res, 400, { error: error.message }); } }
@@ -567,4 +667,4 @@ const server = http.createServer(async (req,res) => {
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, parsedmarcIni, validCron, summarize, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, validCron, summarize, refresh, getSnapshot:()=>snapshot };

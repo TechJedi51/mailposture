@@ -20,7 +20,13 @@ services:
       OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?Set the OpenSearch administrator password}
       OPENSEARCH_VERIFY_TLS: "false"
     volumes:
-      - ${MAILPOSTURE_SETTINGS_PATH:-${ROOT:?Set ROOT to the parent directory for persistent application data}/mailposture/settings}:/data:rw
+      - type: bind
+        source: ${MAILPOSTURE_SETTINGS_PATH:-${ROOT:?Set ROOT to the parent directory for persistent application data}/mailposture/settings}
+        target: /data
+      - type: volume
+        source: parsedmarc_status
+        target: /run/parsedmarc
+        read_only: true
     expose:
       - "8080"
     networks:
@@ -56,8 +62,12 @@ services:
         soft: 65536
         hard: 65536
     volumes:
-      - ${OPENSEARCH_DATA_PATH:-${ROOT}/mailposture/opensearch/data}:/usr/share/opensearch/data:rw
-      - ${OPENSEARCH_SNAPSHOT_PATH:-${ROOT}/mailposture/opensearch/snapshots}:/usr/share/opensearch/snapshots:rw
+      - type: bind
+        source: ${OPENSEARCH_DATA_PATH:-${ROOT}/mailposture/opensearch/data}
+        target: /usr/share/opensearch/data
+      - type: bind
+        source: ${OPENSEARCH_SNAPSHOT_PATH:-${ROOT}/mailposture/opensearch/snapshots}
+        target: /usr/share/opensearch/snapshots
     networks:
       - backend
     healthcheck:
@@ -80,35 +90,54 @@ services:
     command:
       - |
         child=""
+        write_status() {
+          status_state="$$1"
+          status_exit="$${2:-null}"
+          status_time="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          status_checksum="$$(cksum < /etc/parsedmarc/config.ini 2>/dev/null | awk '{print $$1 ":" $$2}')"
+          printf '{"state":"%s","updated_at":"%s","config_checksum":"%s","exit_code":%s}\n' \
+            "$$status_state" "$$status_time" "$$status_checksum" "$$status_exit" \
+            > /run/mailposture/status.json.tmp
+          mv /run/mailposture/status.json.tmp /run/mailposture/status.json
+          chmod 644 /run/mailposture/status.json
+        }
         stop_child() {
           if [ -n "$$child" ]; then
             kill -TERM "$$child" 2>/dev/null || true
             wait "$$child" 2>/dev/null || true
           fi
+          write_status stopped 0
           exit 0
         }
         trap stop_child TERM INT
         while true; do
           while ! grep -q '^\[mailbox\]' /etc/parsedmarc/config.ini 2>/dev/null; do
+            write_status waiting_config null
             echo "Waiting for report mailbox settings to be enabled in MailPosture"
             sleep 10
           done
           checksum="$$(cksum < /etc/parsedmarc/config.ini)"
+          write_status starting null
           parsedmarc -c /etc/parsedmarc/config.ini &
           child="$$!"
+          write_status running null
           while kill -0 "$$child" 2>/dev/null; do
             sleep 10
             updated="$$(cksum < /etc/parsedmarc/config.ini 2>/dev/null || true)"
             if [ "$$updated" != "$$checksum" ]; then
+              write_status reloading null
               echo "MailPosture settings changed; reloading parsedmarc"
               kill -TERM "$$child" 2>/dev/null || true
               wait "$$child" 2>/dev/null || true
               child=""
               break
             fi
+            write_status running null
           done
           if [ -n "$$child" ]; then
-            wait "$$child" 2>/dev/null || true
+            wait "$$child" 2>/dev/null
+            exit_code="$$?"
+            write_status error "$$exit_code"
             child=""
           fi
           sleep 2
@@ -116,7 +145,13 @@ services:
     environment:
       PARSEDMARC_OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD}
     volumes:
-      - ${MAILPOSTURE_SETTINGS_PATH:-${ROOT}/mailposture/settings}/parsedmarc:/etc/parsedmarc:ro
+      - type: bind
+        source: ${MAILPOSTURE_SETTINGS_PATH:-${ROOT}/mailposture/settings}/parsedmarc
+        target: /etc/parsedmarc
+        read_only: true
+      - type: volume
+        source: parsedmarc_status
+        target: /run/mailposture
     networks:
       - backend
     healthcheck:
@@ -125,6 +160,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+volumes:
+  parsedmarc_status:
+    name: ${PARSEDMARC_STATUS_VOLUME:-mailposture_parsedmarc_status}
 
 networks:
   backend:

@@ -22,6 +22,7 @@ Use `docker-compose.yml` when parsedmarc and OpenSearch already exist. Use `comp
 
 - **Dashboard** shows the organization-wide score, domain scores, open issues, aggregate DMARC trends, DMARC failure-report counts, and SMTP TLS results.
 - **Domains** shows the detailed status, report center, attention queue, evidence, and control matrix for one domain at a time.
+- **System Status** directly checks MailPosture storage and refreshes, OpenSearch authentication and cluster health, report indexes, the generated ParseDMARC configuration, and the bundled collector heartbeat.
 - **Settings** separates monitored domains, appearance, OpenSearch, and parsedmarc configuration into accessible tabs with keyboard navigation.
 - **Help** explains setup, every check, and the terminology used by the application.
 
@@ -63,6 +64,8 @@ Archive/
 ```
 
 Saving Settings writes `/data/parsedmarc/config.ini`. The standalone Compose file mounts that generated file at parsedmarc's active `/etc/parsedmarc/config.ini` path and reloads parsedmarc automatically within 10 seconds when it changes. An external parsedmarc deployment must mount the same generated directory—or copy the file to its configured path—and must be restarted by its own service manager.
+
+The standalone stack also uses the small `parsedmarc_status` Docker volume for a runtime heartbeat. MailPosture reads this volume but cannot modify it. ParseDMARC updates it while waiting, running, reloading, or after an unexpected exit. This provides process visibility without granting MailPosture access to the Docker socket. External ParseDMARC deployments remain observable through configuration and OpenSearch report checks, but their process state is reported as unavailable unless they provide a compatible heartbeat.
 
 `Archive/SMTP-TLS` contains the original TLS-RPT messages after parsedmarc processes them. MailPosture does not read or parse that folder. It reads the normalized documents that parsedmarc writes to the configured `smtp_tls*` OpenSearch index, which prevents duplicate processing and mailbox conflicts.
 

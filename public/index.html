@@ -24,14 +24,15 @@
       <span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.6.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
-      <a href="/" data-route="/">Dashboard</a>
-      <a href="/domains" data-route="/domains">Domains</a>
+      <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
+      <a class="toolbar-button" href="/domains" data-route="/domains"><span class="toolbar-icon monitored-domains-icon" aria-hidden="true"></span><span>Domains</span></a>
+      <a id="system-status-tab" class="toolbar-button" href="/status" data-route="/status"><span class="toolbar-icon system-status-icon" aria-hidden="true"></span><span>System Status</span></a>
     </nav>
     <div class="header-actions">
       <span id="updated">Starting checks…</span>
-      <button id="refresh">Run checks</button>
+      <button id="refresh" class="toolbar-button"><span class="toolbar-icon run-checks-icon" aria-hidden="true"></span><span class="toolbar-label">Run checks</span></button>
       <a class="symbol-button" href="/help" data-route="/help" aria-label="Help" title="Help">?</a>
-      <a class="symbol-button" href="/settings" data-route="/settings" aria-label="Settings" title="Settings">⚙</a>
+      <a class="symbol-button" href="/settings" data-route="/settings" aria-label="Settings" title="Settings"><span class="toolbar-icon settings-icon" aria-hidden="true"></span></a>
     </div>
   </header>
 
@@ -68,6 +69,17 @@
     </section>
   </main>
 
+  <main id="system-status-view" class="system-status-view" hidden>
+    <section class="page-intro status-intro">
+      <div><small>Service diagnostics</small><h1>System Status</h1><p>Direct checks of MailPosture storage, OpenSearch, report indexes, and the ParseDMARC collector.</p></div>
+      <div id="system-status-summary" class="system-status-summary" aria-live="polite"></div>
+    </section>
+    <section class="overview-section">
+      <div class="heading"><div><small>Checks</small><h2>Reporting pipeline</h2></div><p id="system-status-updated">Checking services…</p></div>
+      <div id="system-status-checks" class="system-status-grid"><div class="clear">Running system checks…</div></div>
+    </section>
+  </main>
+
   <main id="settings-view" class="settings-view" hidden>
     <section class="page-intro">
       <small>Runtime configuration</small>
@@ -76,10 +88,10 @@
     </section>
     <form id="settings-form" class="settings-form">
       <div class="settings-tabs" role="tablist" aria-label="Settings sections">
-        <button id="settings-tab-domains" role="tab" type="button" aria-selected="true" aria-controls="settings-panel-domains" data-settings-tab="domains">Monitored domains</button>
-        <button id="settings-tab-appearance" role="tab" type="button" aria-selected="false" aria-controls="settings-panel-appearance" data-settings-tab="appearance" tabindex="-1">Appearance</button>
-        <button id="settings-tab-opensearch" role="tab" type="button" aria-selected="false" aria-controls="settings-panel-opensearch" data-settings-tab="opensearch" tabindex="-1">OpenSearch</button>
-        <button id="settings-tab-parsedmarc" role="tab" type="button" aria-selected="false" aria-controls="settings-panel-parsedmarc" data-settings-tab="parsedmarc" tabindex="-1">parsedmarc</button>
+        <button id="settings-tab-domains" role="tab" type="button" aria-selected="true" aria-controls="settings-panel-domains" data-settings-tab="domains"><span class="settings-tab-icon domains-icon" aria-hidden="true"></span><span>Monitored domains</span></button>
+        <button id="settings-tab-appearance" role="tab" type="button" aria-selected="false" aria-controls="settings-panel-appearance" data-settings-tab="appearance" tabindex="-1"><span class="settings-tab-icon appearance-icon" aria-hidden="true"></span><span>Appearance</span></button>
+        <button id="settings-tab-opensearch" role="tab" type="button" aria-selected="false" aria-controls="settings-panel-opensearch" data-settings-tab="opensearch" tabindex="-1"><span class="settings-tab-icon opensearch-icon" aria-hidden="true"></span><span>OpenSearch</span></button>
+        <button id="settings-tab-parsedmarc" role="tab" type="button" aria-selected="false" aria-controls="settings-panel-parsedmarc" data-settings-tab="parsedmarc" tabindex="-1"><span class="settings-tab-icon parsedmarc-icon" aria-hidden="true"></span><span>parsedmarc</span></button>
       </div>
 
       <section id="settings-panel-domains" class="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-domains">
