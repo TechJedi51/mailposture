@@ -1,0 +1,105 @@
+name: mailposture
+
+services:
+  mailposture:
+    image: ${MAILPOSTURE_IMAGE:?Enter the GHCR image, for example ghcr.io/owner/mailposture:latest}
+    pull_policy: always
+    container_name: mailposture
+    restart: unless-stopped
+    depends_on:
+      parsedmarc-opensearch:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-UTC}
+      MAILPOSTURE_DEPLOYMENT_MODE: standalone
+      OPENSEARCH_URL: http://parsedmarc-opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-dmarc_aggregate*}
+      OPENSEARCH_FAILURE_INDEX: ${OPENSEARCH_FAILURE_INDEX:-dmarc_failure*,dmarc_forensic*}
+      OPENSEARCH_SMTP_TLS_INDEX: ${OPENSEARCH_SMTP_TLS_INDEX:-smtp_tls*}
+      OPENSEARCH_USERNAME: admin
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?Set the OpenSearch administrator password}
+      OPENSEARCH_VERIFY_TLS: "false"
+    volumes:
+      - ${MAILPOSTURE_SETTINGS_PATH:-${ROOT:?Set ROOT to the parent directory for persistent application data}/mailposture/settings}:/data:rw
+    expose:
+      - "8080"
+    networks:
+      - backend
+      - proxy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  parsedmarc-opensearch:
+    image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-2}
+    container_name: parsedmarc-opensearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      cluster.name: parsedmarc
+      node.name: parsedmarc-opensearch
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?Set the OpenSearch administrator password}
+      OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS:--Xms1g -Xmx1g}
+      bootstrap.memory_lock: "false"
+      plugins.security.ssl.http.enabled: "false"
+      path.repo: /usr/share/opensearch/snapshots
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - ${OPENSEARCH_DATA_PATH:-${ROOT}/mailposture/opensearch/data}:/usr/share/opensearch/data:rw
+      - ${OPENSEARCH_SNAPSHOT_PATH:-${ROOT}/mailposture/opensearch/snapshots}:/usr/share/opensearch/snapshots:rw
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u admin:$$OPENSEARCH_INITIAL_ADMIN_PASSWORD http://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  parsedmarc:
+    image: ghcr.io/domainaware/parsedmarc:${PARSEDMARC_VERSION:-latest}
+    container_name: parsedmarc
+    restart: unless-stopped
+    depends_on:
+      parsedmarc-opensearch:
+        condition: service_healthy
+      mailposture:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while [ ! -s /etc/parsedmarc/config.ini ]; do
+          echo "Waiting for report mailbox settings to be saved in MailPosture"
+          sleep 30
+        done
+        exec parsedmarc -c /etc/parsedmarc/config.ini
+    environment:
+      PARSEDMARC_OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD}
+    volumes:
+      - ${MAILPOSTURE_SETTINGS_PATH:-${ROOT}/mailposture/settings}/parsedmarc:/etc/parsedmarc:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /etc/parsedmarc/config.ini && test -r /etc/parsedmarc/config.ini"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+networks:
+  backend:
+    name: mailposture-backend
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}

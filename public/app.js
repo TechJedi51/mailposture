@@ -6,6 +6,7 @@ const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy',
 const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
 const clone = value => JSON.parse(JSON.stringify(value));
+const number = value => new Intl.NumberFormat().format(Math.round(Number(value || 0)));
 
 function ago(value) {
   if (!value) return 'Starting checks…';
@@ -27,6 +28,65 @@ function tlsEndpoint(check, domain) {
   return `${check.evidence?.host || domain}:${check.evidence?.port || '—'}`;
 }
 
+function trendChart(points, successKey, failureKey, label) {
+  if (!points?.length) return '<p class="report-empty">No daily trend is available for this period.</p>';
+  const maximum = Math.max(1, ...points.map(point => Number(point[successKey] || 0) + Number(point[failureKey] || 0)));
+  const columns = points.map(point => {
+    const success = Number(point[successKey] || 0); const failed = Number(point[failureKey] || 0);
+    const successHeight = Math.max(success ? 2 : 0, success / maximum * 100); const failedHeight = Math.max(failed ? 2 : 0, failed / maximum * 100);
+    const date = new Date(`${String(point.date).slice(0, 10)}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return `<span class="chart-column" title="${esc(date)}: ${number(success)} successful, ${number(failed)} failed"><i class="chart-bar" style="height:${successHeight}%"></i><i class="chart-bar failed" style="height:${failedHeight}%"></i></span>`;
+  }).join('');
+  return `<div class="chart" role="img" aria-label="${esc(label)}">${columns}</div><div class="chart-legend"><span><i></i>Successful</span><span class="failed"><i></i>Failed</span></div>`;
+}
+
+function rankedList(items, nameKey, valueKey, emptyText) {
+  if (!items?.length) return `<p class="report-empty">${esc(emptyText)}</p>`;
+  const maximum = Math.max(1, ...items.map(item => Number(item[valueKey] || 0)));
+  return `<ol class="ranked-list">${items.map(item => `<li><span>${esc(item[nameKey])}</span><strong>${number(item[valueKey])}</strong><span class="rank-bar"><i style="width:${Number(item[valueKey] || 0) / maximum * 100}%"></i></span></li>`).join('')}</ol>`;
+}
+
+function aggregateCard(report, wide = false) {
+  if (!report?.total) return `<article class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>Authentication results reported by receiving email services.</p></div></div><p class="report-empty">No aggregate report data was found for this period.</p></article>`;
+  const passed = Math.max(0, Number(report.total) - Number(report.failed || 0));
+  return `<article class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>${number(report.total)} messages observed over ${number(report.period_days)} days</p></div><span class="report-value">${report.pass_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.failed)}</strong><span>DMARC failures</span></div><div class="metric"><strong>${report.dkim_pass_rate ?? '—'}%</strong><span>DKIM aligned</span></div><div class="metric"><strong>${report.spf_pass_rate ?? '—'}%</strong><span>SPF aligned</span></div></div>${trendChart((report.timeline || []).map(item => ({...item, passed: Math.max(0, item.total - item.failed)})), 'passed', 'failed', `DMARC daily results: ${number(passed)} successful and ${number(report.failed)} failed`)}</article>`;
+}
+
+function smtpTlsCard(report) {
+  if (!report?.available || (!report.successful && !report.failed)) return '<article class="report-card"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>Transport security results reported by sending services.</p></div></div><p class="report-empty">No SMTP TLS report data was found for this period.</p></article>';
+  return `<article class="report-card"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>${number(report.reports)} reported policies</p></div><span class="report-value">${report.success_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.successful)}</strong><span>Successful sessions</span></div><div class="metric"><strong>${number(report.failed)}</strong><span>Failed sessions</span></div><div class="metric"><strong>${number(report.failure_types?.length)}</strong><span>Failure types</span></div></div>${trendChart(report.timeline, 'successful', 'failed', `SMTP TLS daily results: ${number(report.successful)} successful and ${number(report.failed)} failed`)}</article>`;
+}
+
+function failureCard(report) {
+  return `<article class="report-card"><div class="report-card-header"><div><h3>DMARC failure reports</h3><p>Individual authentication failure notices</p></div><span class="report-value">${report?.available ? number(report.count) : '—'}</span></div><p class="privacy-note">${esc(report?.privacy_note || report?.error || 'Failure report data is not available.')}</p></article>`;
+}
+
+function reportingOrganizationsCard(report) {
+  return `<article class="report-card"><div class="report-card-header"><div><h3>TLS reporting organizations</h3><p>Services that supplied SMTP TLS results</p></div></div>${rankedList(report?.organizations, 'name', 'sessions', 'No TLS reporting organizations were found.')}</article>`;
+}
+
+function detailCards(reports) {
+  return `${aggregateCard(reports?.aggregate, true)}${smtpTlsCard(reports?.smtp_tls)}${failureCard(reports?.failure)}<article class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages</p></div></div>${rankedList(reports?.aggregate?.top_failing_sources, 'ip', 'messages', 'No failing sources were reported.')}</article><article class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${reportingOrganizationsCard(reports?.smtp_tls)}`;
+}
+
+function organizationReports(domains) {
+  const aggregate = { total: 0, failed: 0, period_days: 0, timeline: [], top_failing_sources: [] }; const smtp = { available: false, reports: 0, successful: 0, failed: 0, timeline: [], failure_types: [], organizations: [] }; let failures = 0; let failureAvailable = false;
+  const days = new Map(); const tlsDays = new Map(); const sources = new Map(); const types = new Map(); const organizations = new Map(); let dkimWeighted = 0; let spfWeighted = 0;
+  for (const domain of domains) {
+    const a = domain.reports?.aggregate || {}; aggregate.total += Number(a.total || 0); aggregate.failed += Number(a.failed || 0); aggregate.period_days = Math.max(aggregate.period_days, Number(a.period_days || 0)); dkimWeighted += Number(a.dkim_pass_rate || 0) * Number(a.total || 0); spfWeighted += Number(a.spf_pass_rate || 0) * Number(a.total || 0);
+    for (const point of a.timeline || []) { const key = String(point.date).slice(0,10); const day = days.get(key) || {date:key,total:0,failed:0}; day.total += Number(point.total || 0); day.failed += Number(point.failed || 0); days.set(key,day); }
+    for (const item of a.top_failing_sources || []) sources.set(item.ip, (sources.get(item.ip) || 0) + Number(item.messages || 0));
+    const t = domain.reports?.smtp_tls || {}; if (t.available) smtp.available = true; smtp.reports += Number(t.reports || 0); smtp.successful += Number(t.successful || 0); smtp.failed += Number(t.failed || 0);
+    for (const point of t.timeline || []) { const key = String(point.date).slice(0,10); const day = tlsDays.get(key) || {date:key,successful:0,failed:0}; day.successful += Number(point.successful || 0); day.failed += Number(point.failed || 0); tlsDays.set(key,day); }
+    for (const item of t.failure_types || []) types.set(item.type, (types.get(item.type) || 0) + Number(item.count || 0));
+    for (const item of t.organizations || []) organizations.set(item.name, (organizations.get(item.name) || 0) + Number(item.sessions || 0));
+    const f = domain.reports?.failure || {}; if (f.available) failureAvailable = true; failures += Number(f.count || 0);
+  }
+  aggregate.pass_rate = aggregate.total ? Math.round((aggregate.total - aggregate.failed) / aggregate.total * 1000) / 10 : null; aggregate.dkim_pass_rate = aggregate.total ? Math.round(dkimWeighted / aggregate.total * 10) / 10 : null; aggregate.spf_pass_rate = aggregate.total ? Math.round(spfWeighted / aggregate.total * 10) / 10 : null; aggregate.timeline = [...days.values()].sort((a,b)=>a.date.localeCompare(b.date)); aggregate.top_failing_sources = [...sources].map(([ip,messages])=>({ip,messages})).sort((a,b)=>b.messages-a.messages).slice(0,8);
+  const tlsTotal = smtp.successful + smtp.failed; smtp.success_rate = tlsTotal ? Math.round(smtp.successful / tlsTotal * 1000) / 10 : null; smtp.timeline = [...tlsDays.values()].sort((a,b)=>a.date.localeCompare(b.date)); smtp.failure_types = [...types].map(([type,count])=>({type,count})).sort((a,b)=>b.count-a.count).slice(0,8); smtp.organizations = [...organizations].map(([name,sessions])=>({name,sessions})).sort((a,b)=>b.sessions-a.sessions).slice(0,8);
+  return { aggregate, smtp_tls: smtp, failure: { available: failureAvailable, count: failures, privacy_note: 'Counts only. Message samples remain private.' } };
+}
+
 function setTheme(mode, persist = true) {
   const normalized = ['light', 'dark', 'system'].includes(mode) ? mode : 'system';
   const resolved = normalized === 'system' ? (themeQuery.matches ? 'dark' : 'light') : normalized;
@@ -44,12 +104,14 @@ function renderDashboard() {
     $('#master-score').innerHTML = '<span>Unavailable</span>';
     $('#domain-scores').innerHTML = `<div class="error">${esc(data.error)}</div>`;
     $('#master-attention').innerHTML = '';
+    $('#organization-reports').innerHTML = '';
     return;
   }
   if (!data.domains.length) {
     $('#master-score').innerHTML = '<strong>—</strong><span>No domains configured</span>';
     $('#domain-scores').innerHTML = '<div class="empty-state"><h3>Add your first domain</h3><p>Configure a domain, its DKIM selectors, and its TLS certificate endpoints.</p><a href="/settings" data-route="/settings">Open Settings →</a></div>';
     $('#master-attention').innerHTML = '<div class="clear">There are no domains to evaluate.</div>';
+    $('#organization-reports').innerHTML = '<div class="empty-state"><h3>No report data yet</h3><p>Add a domain and connect a report source.</p></div>';
     $('#master-issue-count').textContent = '0 open';
     return;
   }
@@ -67,6 +129,8 @@ function renderDashboard() {
     if (!issues.length) return '';
     return `<section class="attention-group"><div class="attention-group-heading"><h3>${esc(domain.domain)}</h3><button data-open-domain="${domainIndex}">View domain →</button></div>${issues.map(check => `<article class="issue ${check.status}"><span class="icon">${check.status === 'critical' ? '!' : '•'}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-dashboard-check="${esc(check.id)}" data-domain-index="${domainIndex}">View →</button></article>`).join('')}</section>`;
   }).join('') : '<div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
+  const reports = organizationReports(data.domains);
+  $('#organization-reports').innerHTML = `${aggregateCard(reports.aggregate)}${smtpTlsCard(reports.smtp_tls)}${failureCard(reports.failure)}${reportingOrganizationsCard(reports.smtp_tls)}`;
 }
 
 function renderDomain() {
@@ -78,6 +142,7 @@ function renderDomain() {
     $('#domains').innerHTML = '';
     $('#checks').innerHTML = '';
     $('#attention').innerHTML = `<div class="error">${esc(data.error)}</div>`;
+    $('#domain-reports').innerHTML = '';
     return;
   }
   if (!data.domains.length) {
@@ -85,6 +150,7 @@ function renderDomain() {
     $('#domains').innerHTML = '';
     $('#checks').innerHTML = '';
     $('#attention').innerHTML = '<div class="clear">No domains are configured yet.</div>';
+    $('#domain-reports').innerHTML = '';
     return;
   }
   if (state.selected >= data.domains.length) state.selected = 0;
@@ -98,6 +164,7 @@ function renderDomain() {
     const endpoint = tlsEndpoint(check, domain.domain);
     return `<button class="card" data-check="${esc(check.id)}"><div class="card-top"><span><span class="label">${esc(check.label)}</span>${endpoint ? `<span class="card-context">${esc(endpoint)}</span>` : ''}</span><span class="state ${check.status}">${names[check.status]}</span></div><h3>${esc(check.summary)}</h3><p>${esc(check.detail)}</p></button>`;
   }).join('');
+  $('#domain-reports').innerHTML = detailCards(domain.reports);
 }
 
 function renderStatus() {
@@ -146,10 +213,44 @@ async function loadSettings() {
   $('#report-days').value = settings.report_days;
   $('#refresh-minutes').value = settings.refresh_minutes;
   $('#request-timeout').value = settings.request_timeout_ms;
-  $('#opensearch-enabled').checked = settings.opensearch_enabled;
+  $('#report-source').value = settings.report_source;
+  $('#opensearch-url').value = settings.opensearch_url;
+  $('#opensearch-username').value = settings.opensearch_username;
+  $('#opensearch-verify-tls').checked = settings.opensearch_verify_tls;
+  $('#aggregate-index').value = settings.opensearch_aggregate_index;
+  $('#failure-index').value = settings.opensearch_failure_index;
+  $('#smtp-tls-index').value = settings.opensearch_smtp_tls_index;
+  $('#mailbox-enabled').checked = settings.mailbox.enabled;
+  $('#imap-host').value = settings.mailbox.host;
+  $('#imap-port').value = settings.mailbox.port;
+  $('#imap-username').value = settings.mailbox.username;
+  $('#imap-password').value = '';
+  $('#imap-ssl').checked = settings.mailbox.ssl;
+  $('#reports-folder').value = settings.mailbox.reports_folder;
+  $('#archive-folder').value = settings.mailbox.archive_folder;
+  $('#imap-password-status').textContent = settings.mailbox.password_set ? 'A password is saved. Leave this blank to keep it.' : 'No password is saved.';
+  $('#snapshots-enabled').checked = settings.snapshots.enabled;
+  $('#snapshot-cron').value = settings.snapshots.cron;
+  $('#snapshot-delete-cron').value = settings.snapshots.delete_cron;
+  $('#snapshot-timezone').value = settings.snapshots.timezone;
+  $('#snapshot-retention').value = settings.snapshots.retention_days;
+  $('#snapshot-min').value = settings.snapshots.min_count;
+  $('#snapshot-max').value = settings.snapshots.max_count;
   setTheme(localStorage.getItem('mailposture-theme') || 'system', false);
   renderSettingsDomains();
+  updateSettingsVisibility();
   state.settingsLoaded = true;
+}
+
+function updateSettingsVisibility() {
+  const source = $('#report-source').value;
+  $('#opensearch-fields').hidden = source === 'disabled';
+  $('#collector-panel').hidden = source !== 'standalone';
+  $('#snapshot-panel').hidden = source !== 'standalone';
+  $('#mailbox-fields').hidden = !$('#mailbox-enabled').checked;
+  $('#snapshot-fields').hidden = !$('#snapshots-enabled').checked;
+  const archive = $('#archive-folder').value.trim() || 'Archive';
+  $('#archive-preview').textContent = `${archive}/Aggregate · ${archive}/Failure · ${archive}/Invalid · ${archive}/SMTP-TLS · ${archive}/Unsaved`;
 }
 
 function renderEditorLists() {
@@ -250,14 +351,43 @@ async function saveSettings(event) {
       report_days: Number($('#report-days').value),
       refresh_minutes: Number($('#refresh-minutes').value),
       request_timeout_ms: Number($('#request-timeout').value),
-      opensearch_enabled: $('#opensearch-enabled').checked
+      report_source: $('#report-source').value,
+      opensearch_url: $('#opensearch-url').value.trim(),
+      opensearch_username: $('#opensearch-username').value.trim(),
+      opensearch_verify_tls: $('#opensearch-verify-tls').checked,
+      opensearch_aggregate_index: $('#aggregate-index').value.trim(),
+      opensearch_failure_index: $('#failure-index').value.trim(),
+      opensearch_smtp_tls_index: $('#smtp-tls-index').value.trim(),
+      mailbox: {
+        ...state.settings.mailbox,
+        enabled: $('#mailbox-enabled').checked,
+        host: $('#imap-host').value.trim(),
+        port: Number($('#imap-port').value),
+        username: $('#imap-username').value.trim(),
+        password: $('#imap-password').value,
+        ssl: $('#imap-ssl').checked,
+        reports_folder: $('#reports-folder').value.trim(),
+        archive_folder: $('#archive-folder').value.trim(),
+        watch: true
+      },
+      snapshots: {
+        enabled: $('#snapshots-enabled').checked,
+        cron: $('#snapshot-cron').value.trim(),
+        delete_cron: $('#snapshot-delete-cron').value.trim(),
+        timezone: $('#snapshot-timezone').value.trim(),
+        retention_days: Number($('#snapshot-retention').value),
+        min_count: Number($('#snapshot-min').value),
+        max_count: Number($('#snapshot-max').value)
+      }
     };
     const response = await fetch('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Unable to save settings');
     state.settings = clone(result);
-    message.textContent = 'Settings saved. Checks have been refreshed.';
-    message.className = 'success';
+    $('#imap-password').value = '';
+    $('#imap-password-status').textContent = result.mailbox.password_set ? 'A password is saved. Leave this blank to keep it.' : 'No password is saved.';
+    message.textContent = result.snapshot_notice || (result.parsedmarc_restart_required ? 'Settings saved. Restart parsedmarc to apply mailbox changes.' : 'Settings saved. Checks have been refreshed.');
+    message.className = result.snapshot_notice ? 'pending' : 'success';
     renderSettingsDomains();
     await loadStatus();
   } catch (error) {
@@ -310,6 +440,10 @@ $('#selector-add').onclick = addSelector;
 $('#endpoint-add').onclick = addEndpoint;
 document.querySelectorAll('.domain-cancel').forEach(button => { button.onclick = () => $('#domain-dialog').close(); });
 document.querySelectorAll('input[name="theme"]').forEach(input => { input.onchange = () => setTheme(input.value); });
+$('#report-source').onchange = updateSettingsVisibility;
+$('#mailbox-enabled').onchange = updateSettingsVisibility;
+$('#snapshots-enabled').onchange = updateSettingsVisibility;
+$('#archive-folder').oninput = updateSettingsVisibility;
 themeQuery.addEventListener?.('change', () => { if ((localStorage.getItem('mailposture-theme') || 'system') === 'system') setTheme('system', false); });
 
 document.onclick = event => {

@@ -1,6 +1,6 @@
 # MailPosture with Dockhand
 
-MailPosture is a generic, read-only status page for DMARC, parsedmarc aggregate results, DKIM, MTA-STS, TLS-RPT, TLS certificates, and BIMI. It contains no user-specific domain configuration. Operational settings are entered in the web UI and saved in a named Docker volume; Dockhand supplies only deployment and OpenSearch connection values.
+MailPosture is a generic, management-focused status page for DMARC aggregate and failure reports, SMTP TLS reports, DKIM, MTA-STS, TLS certificates, and BIMI. It contains no user-specific domain configuration. Operational settings are entered in the web interface and saved in persistent storage; Dockhand supplies deployment secrets and storage paths.
 
 ## Included files
 
@@ -8,6 +8,7 @@ MailPosture is a generic, read-only status page for DMARC, parsedmarc aggregate 
 mailposture/
 ├── .github/workflows/       # Tests and publishes the image to GHCR
 ├── docker-compose.yml
+├── compose.standalone.yml
 ├── Dockerfile
 ├── .env.example
 ├── server.js
@@ -15,13 +16,13 @@ mailposture/
 └── test/
 ```
 
-No host bind mount is required. Docker stores `/data/settings.json` in the `mailposture_data` named volume so image updates do not erase it.
+Use `docker-compose.yml` when parsedmarc and OpenSearch already exist. Use `compose.standalone.yml` to deploy MailPosture, the official `ghcr.io/domainaware/parsedmarc` image, and OpenSearch together. They remain separate containers so each service can be upgraded, restarted, secured, and backed up independently.
 
 ## Interface
 
-- **Dashboard** shows the organization-wide score, a score for each domain, and open issues grouped by domain.
-- **Domains** shows the detailed status, attention queue, evidence, and control matrix for one domain at a time.
-- **Settings** manages domains, per-domain DKIM selectors and TLS certificate endpoints, monitoring intervals, OpenSearch reporting, and Light, Dark, or System appearance.
+- **Dashboard** shows the organization-wide score, domain scores, open issues, aggregate DMARC trends, DMARC failure-report counts, and SMTP TLS results.
+- **Domains** shows the detailed status, report center, attention queue, evidence, and control matrix for one domain at a time.
+- **Settings** manages domains, DKIM selectors, TLS certificate endpoints, report source, parsedmarc mailbox folders, snapshot scheduling, monitoring intervals, and appearance.
 - **Help** explains setup, every check, and the terminology used by the application.
 
 ## Settings screen
@@ -43,6 +44,33 @@ Edit a domain, then add each active selector by its label, such as `selector1` o
 Edit a domain, then add each endpoint as a host and port, such as `mta-sts.example.com` on port `443` or `mail.example.com` on port `465`.
 
 Direct TLS endpoints such as HTTPS 443, SMTP 465, and IMAP 993 are supported. SMTP STARTTLS on ports 25 and 587 is not currently probed.
+
+### Report source
+
+Choose **Bundled services** with `compose.standalone.yml`, **External OpenSearch** when an existing parsedmarc/OpenSearch deployment supplies the data, or **Live checks only** to disable historical reporting. The OpenSearch password remains a Dockhand secret and is never returned to the browser.
+
+### Report mailbox
+
+One mailbox is normally sufficient for every monitored domain. Point each domain's DMARC `rua` and TLS-RPT `rua` address—or aliases for those addresses—to the same account. parsedmarc watches the configured incoming folder and sorts messages below the configured archive folder:
+
+```text
+Archive/
+├── Aggregate
+├── Failure
+├── Invalid
+├── SMTP-TLS
+└── Unsaved
+```
+
+Saving Settings writes `/data/parsedmarc/config.ini`. The standalone Compose file shares that directory read-only with parsedmarc. Restart the parsedmarc service after changing mailbox settings. MailPosture does not parse, move, or delete report messages itself.
+
+Failure reports can contain message headers or content. MailPosture shows counts but intentionally does not display those samples.
+
+### OpenSearch snapshots
+
+The standalone stack mounts `${ROOT}/mailposture/opensearch/snapshots` by default and MailPosture registers it as the `mailposture` file-system repository. Set `OPENSEARCH_SNAPSHOT_PATH` to reuse an existing absolute host path instead. Saving an enabled snapshot schedule creates or updates OpenSearch's native `mailposture` snapshot policy using the configured creation cron, cleanup cron, time zone, age, and count limits.
+
+The snapshot directory is on the same host by default. Copy it to separate storage to protect against host or disk failure.
 
 ## 1. Create the local repository
 
@@ -106,7 +134,7 @@ Password: a token with read:packages access
 1. Add credentials for the private GitHub repository under **Settings → Git**.
 2. Create a new Git-backed stack and choose the target Docker environment.
 3. Select the repository and the `main` branch.
-4. Set **Compose file path** to `docker-compose.yml`.
+4. Set **Compose file path** to `compose.standalone.yml` for a complete deployment, or `docker-compose.yml` when using an existing OpenSearch service.
 5. Set **Context directory** to the repository root (`.` or blank).
 6. Leave **Build images on deploy** disabled; GitHub has already built the image.
 7. Enable **Re-pull images** so Dockhand refreshes the `latest` tag.
@@ -117,10 +145,11 @@ Password: a token with read:packages access
 
 ```dotenv
 MAILPOSTURE_IMAGE=ghcr.io/your-github-username/mailposture:latest
-OPENSEARCH_PASSWORD=your-real-opensearch-password
+ROOT=/srv/docker-data
+OPENSEARCH_INITIAL_ADMIN_PASSWORD=your-strong-opensearch-password
 ```
 
-Mark `OPENSEARCH_PASSWORD` as a secret. It is required when the OpenSearch switch is enabled in MailPosture Settings; omit it when OpenSearch integration is disabled.
+Mark the OpenSearch password as a secret. For the lightweight Compose file, provide the same value as `OPENSEARCH_PASSWORD` instead of `OPENSEARCH_INITIAL_ADMIN_PASSWORD`.
 
 ### Optional Dockhand variables
 
@@ -128,20 +157,28 @@ Mark `OPENSEARCH_PASSWORD` as a secret. It is required when the OpenSearch switc
 TZ=America/Los_Angeles
 OPENSEARCH_URL=http://parsedmarc-opensearch:9200
 OPENSEARCH_INDEX=dmarc_aggregate*
+OPENSEARCH_FAILURE_INDEX=dmarc_failure*,dmarc_forensic*
+OPENSEARCH_SMTP_TLS_INDEX=smtp_tls*
 OPENSEARCH_USERNAME=admin
 OPENSEARCH_VERIFY_TLS=false
 MONITORING_NETWORK=monitoring
 PROXY_NETWORK=proxy
 MAILPOSTURE_DATA_VOLUME=mailposture_data
+OPENSEARCH_VERSION=2
+PARSEDMARC_VERSION=latest
+OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+MAILPOSTURE_SETTINGS_PATH=/srv/docker-data/mailposture
+OPENSEARCH_DATA_PATH=/srv/docker-data/parsedmarc/opensearch/data
+OPENSEARCH_SNAPSHOT_PATH=/srv/docker-data/parsedmarc/opensearch/snapshots
 ```
 
-The Compose file provides the displayed defaults for optional values. Adding them explicitly to Dockhand makes the deployment settings easier to audit. Disable OpenSearch on the Settings screen to run only public DNS and endpoint checks; in that mode, an OpenSearch password is not required.
+The Compose files provide defaults for optional values. The three `*_PATH` variables are migration overrides: set them to absolute host paths to reuse MailPosture settings, OpenSearch data, or an existing snapshot repository, and omit them for the new default folders. Do not run snapshot jobs from two OpenSearch clusters against the same repository. The Settings screen can override the OpenSearch URL, username, index patterns, and certificate verification behavior. The password remains an environment secret.
 
 Use the lowercase owner and repository path shown on the GitHub package page for `MAILPOSTURE_IMAGE`.
 
 ## 5. Reverse proxy
 
-The stack joins two external networks. Their defaults are `monitoring` and `proxy`, and both must already exist on the target Docker environment. Other users can set `MONITORING_NETWORK` and `PROXY_NETWORK` to their own network names without editing the repository.
+The lightweight stack joins the existing external `monitoring` and `proxy` networks. The standalone stack creates its own private `mailposture-backend` network and joins only the existing external `proxy` network. Set `MONITORING_NETWORK` or `PROXY_NETWORK` to use different existing network names without editing the repository.
 
 Point the reverse proxy at:
 
@@ -162,7 +199,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Open MailPosture, select the gear button, add the monitored domains and their selectors and endpoints, then save. The settings are stored in the named volume rather than `.env`. Appearance preference is stored in the browser because it is specific to each device.
+Open MailPosture, select the Settings button, add the monitored domains and their selectors and endpoints, then save. With the standalone stack, also enter the report mailbox and enable snapshots. Restart parsedmarc after the first save. Appearance preference is stored in the browser because it is specific to each device.
 
 `.env` is excluded by `.gitignore`. It must never be committed.
 
@@ -199,15 +236,32 @@ After creating the Dockhand Git stack:
 
 On later pushes, GitHub tests and publishes the image first, then signs a deployment request with HMAC-SHA256 and sends it to Dockhand. If either secret is absent, this step is skipped and manual deployment remains available.
 
-## Existing parsedmarc path correction
+## Standalone persistent folders
 
-The earlier monitoring stack starts parsedmarc with `/etc/parsedmarc.ini`, but mounts the configuration at `/etc/parsedmarc/config.ini`. The paths must match:
+Create these folders before the first standalone deployment and grant the container users access appropriate to your Docker host:
 
-```yaml
-command: ["-c", "/etc/parsedmarc/config.ini"]
-volumes:
-  - ${ROOT}/parsedmarc/config/parsedmarc.ini:/etc/parsedmarc/config.ini:ro
+```text
+${ROOT}/mailposture/
+├── settings/
+│   ├── settings.json
+│   ├── secrets.json
+│   └── parsedmarc/config.ini
+└── opensearch/
+    ├── data/
+    └── snapshots/
 ```
+
+Do not place this mutable data inside Dockhand's Git checkout. Do not commit `settings.json`, `secrets.json`, `config.ini`, OpenSearch data, or snapshots.
+
+To keep the data from the stack shown in this guide without copying it, set these Dockhand variables to the actual absolute paths represented by your current `${ROOT}` value:
+
+```dotenv
+MAILPOSTURE_SETTINGS_PATH=/your/current/root/mailposture
+OPENSEARCH_DATA_PATH=/your/current/root/parsedmarc/opensearch/data
+OPENSEARCH_SNAPSHOT_PATH=/your/current/root/parsedmarc/opensearch/snapshots
+```
+
+Stop the old parsedmarc and OpenSearch services before starting the standalone stack against those paths. A data directory or snapshot repository must never be opened concurrently by two OpenSearch containers.
 
 ## Verification
 
@@ -215,4 +269,4 @@ volumes:
 npm test
 ```
 
-MailPosture never writes to DNS, mailboxes, or OpenSearch. Its container uses a read-only root filesystem, a writable settings-only named volume, no Linux capabilities, and no host bind mounts.
+MailPosture never writes to DNS or mailboxes. In standalone mode it writes its own settings, secrets, and generated parsedmarc configuration, and it manages the OpenSearch snapshot repository and policy. Its root filesystem remains read-only, `/data` is the only writable application mount, and the container has no Linux capabilities or Docker socket access.

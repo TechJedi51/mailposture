@@ -8,13 +8,16 @@ services:
     restart: unless-stopped
     environment:
       TZ: ${TZ:-UTC}
+      MAILPOSTURE_DEPLOYMENT_MODE: external
       OPENSEARCH_URL: ${OPENSEARCH_URL:-http://parsedmarc-opensearch:9200}
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-dmarc_aggregate*}
+      OPENSEARCH_FAILURE_INDEX: ${OPENSEARCH_FAILURE_INDEX:-dmarc_failure*,dmarc_forensic*}
+      OPENSEARCH_SMTP_TLS_INDEX: ${OPENSEARCH_SMTP_TLS_INDEX:-smtp_tls*}
       OPENSEARCH_USERNAME: ${OPENSEARCH_USERNAME:-admin}
       OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:-}
       OPENSEARCH_VERIFY_TLS: ${OPENSEARCH_VERIFY_TLS:-false}
     volumes:
-      - mailposture_data:/data
+      - mailposture_data:/data:rw
     expose:
       - "8080"
     networks:

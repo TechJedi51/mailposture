@@ -12,6 +12,8 @@ const { version: PACKAGE_VERSION } = require('./package.json');
 const PORT = Number(process.env.PORT || 8080);
 const APP_VERSION = process.env.APP_VERSION || PACKAGE_VERSION;
 const SETTINGS_PATH = process.env.SETTINGS_PATH || '/data/settings.json';
+const SECRETS_PATH = process.env.SECRETS_PATH || '/data/secrets.json';
+const PARSEDMARC_CONFIG_PATH = process.env.PARSEDMARC_CONFIG_PATH || '/data/parsedmarc/config.ini';
 const PUBLIC = path.join(__dirname, 'public');
 const startedAt = Date.now();
 let snapshot = { version: APP_VERSION, generated_at: null, refreshing: false, domains: [], summary: { critical: 0, warning: 0, healthy: 0 } };
@@ -60,6 +62,26 @@ function boundedNumber(value, fallback, min, max, label) {
   return Math.round(number);
 }
 
+function textValue(value, fallback = '', max = 2048) {
+  const normalized = String(value ?? fallback).trim();
+  if (normalized.length > max || /[\r\n]/.test(normalized)) throw new Error('Settings contain an invalid text value');
+  return normalized;
+}
+
+function validHttpUrl(value) {
+  try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; } catch (_) { return false; }
+}
+
+function validCron(value) {
+  const fields = String(value || '').trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  const limits = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+  return fields.every((field, index) => {
+    if (!/^(?:\*|\d+)(?:[-/,](?:\*|\d+))*$/.test(field) || /\/0(?:\D|$)/.test(field)) return false;
+    return (field.match(/\d+/g) || []).every(number => Number(number) >= limits[index][0] && Number(number) <= limits[index][1]);
+  });
+}
+
 function normalizeSettings(input = {}) {
   const domains = [...new Set((Array.isArray(input.monitored_domains) ? input.monitored_domains : []).map(v => String(v).trim().toLowerCase().replace(/\.$/, '')).filter(Boolean))];
   for (const domain of domains) if (!validDomain(domain)) throw new Error(`Invalid monitored domain: ${domain}`);
@@ -80,16 +102,88 @@ function normalizeSettings(input = {}) {
       if (!Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) throw new Error(`Invalid TLS endpoint port for ${endpoint.host}`);
     }
   }
+  const environmentMode = ['standalone', 'external'].includes(process.env.MAILPOSTURE_DEPLOYMENT_MODE) ? process.env.MAILPOSTURE_DEPLOYMENT_MODE : 'external';
+  const reportSource = ['standalone', 'external', 'disabled'].includes(input.report_source) ? input.report_source : (input.opensearch_enabled === false ? 'disabled' : environmentMode);
+  const opensearchUrl = textValue(input.opensearch_url, process.env.OPENSEARCH_URL || 'http://parsedmarc-opensearch:9200');
+  if (!validHttpUrl(opensearchUrl)) throw new Error('OpenSearch URL must be an HTTP or HTTPS URL without embedded credentials');
+  const snapshotCron = textValue(input.snapshots?.cron, input.snapshot_cron || '0 2 * * *', 100);
+  const snapshotDeleteCron = textValue(input.snapshots?.delete_cron, input.snapshot_delete_cron || '30 2 * * *', 100);
+  if (!validCron(snapshotCron) || !validCron(snapshotDeleteCron)) throw new Error('Snapshot schedules must use five-field cron expressions');
+  const mailbox = input.mailbox || {};
+  const snapshotMin = boundedNumber(input.snapshots?.min_count, 7, 1, 1000, 'Minimum snapshots');
+  const snapshotMax = boundedNumber(input.snapshots?.max_count, 60, 1, 10000, 'Maximum snapshots');
+  if (snapshotMin > snapshotMax) throw new Error('Minimum snapshots cannot exceed maximum snapshots');
   return {
-    schema_version: 1,
+    schema_version: 2,
     monitored_domains: domains,
     dkim_selectors: selectors,
     tls_endpoints: endpoints,
     report_days: boundedNumber(input.report_days, 7, 1, 365, 'Report days'),
     refresh_minutes: boundedNumber(input.refresh_minutes, 15, 1, 1440, 'Refresh minutes'),
     request_timeout_ms: boundedNumber(input.request_timeout_ms, 8000, 1000, 60000, 'Request timeout'),
-    opensearch_enabled: input.opensearch_enabled !== false
+    opensearch_enabled: reportSource !== 'disabled',
+    report_source: reportSource,
+    opensearch_url: opensearchUrl.replace(/\/$/, ''),
+    opensearch_aggregate_index: textValue(input.opensearch_aggregate_index, process.env.OPENSEARCH_INDEX || 'dmarc_aggregate*', 255),
+    opensearch_failure_index: textValue(input.opensearch_failure_index, process.env.OPENSEARCH_FAILURE_INDEX || 'dmarc_failure*,dmarc_forensic*', 255),
+    opensearch_smtp_tls_index: textValue(input.opensearch_smtp_tls_index, process.env.OPENSEARCH_SMTP_TLS_INDEX || 'smtp_tls*', 255),
+    opensearch_username: textValue(input.opensearch_username, process.env.OPENSEARCH_USERNAME || 'admin', 255),
+    opensearch_verify_tls: input.opensearch_verify_tls === undefined
+      ? String(process.env.OPENSEARCH_VERIFY_TLS || 'false').toLowerCase() === 'true'
+      : input.opensearch_verify_tls === true,
+    mailbox: {
+      enabled: mailbox.enabled === true,
+      host: textValue(mailbox.host, process.env.PARSEDMARC_IMAP_HOST || '', 255),
+      port: boundedNumber(mailbox.port, 993, 1, 65535, 'IMAP port'),
+      username: textValue(mailbox.username, process.env.PARSEDMARC_IMAP_USER || '', 512),
+      ssl: mailbox.ssl !== false,
+      reports_folder: textValue(mailbox.reports_folder, 'INBOX', 255),
+      archive_folder: textValue(mailbox.archive_folder, 'Archive', 255),
+      watch: mailbox.watch !== false,
+      password_set: false
+    },
+    snapshots: {
+      enabled: input.snapshots?.enabled === undefined ? reportSource === 'standalone' : input.snapshots.enabled === true,
+      cron: snapshotCron,
+      delete_cron: snapshotDeleteCron,
+      timezone: textValue(input.snapshots?.timezone, process.env.TZ || 'UTC', 100),
+      retention_days: boundedNumber(input.snapshots?.retention_days, 30, 1, 3650, 'Snapshot retention'),
+      min_count: snapshotMin,
+      max_count: snapshotMax
+    }
   };
+}
+
+function readSecrets() {
+  try { return JSON.parse(fs.readFileSync(SECRETS_PATH, 'utf8')); } catch (_) { return {}; }
+}
+
+function publicSettings(settings = getSettings()) {
+  const secrets = readSecrets();
+  return { ...settings, mailbox: { ...settings.mailbox, password: '', password_set: Boolean(secrets.imap_password) } };
+}
+
+async function atomicWrite(filename, content, mode = 0o600) {
+  const temporary = `${filename}.tmp`;
+  await fs.promises.mkdir(path.dirname(filename), { recursive: true });
+  await fs.promises.writeFile(temporary, content, { mode });
+  await fs.promises.rename(temporary, filename);
+}
+
+function parsedmarcIni(settings, secrets = {}) {
+  if (!settings.mailbox.enabled) return '# Mailbox collection is disabled in MailPosture.\n';
+  const lines = [
+    '[general]', 'save_aggregate = True', 'save_failure = True', 'save_smtp_tls = True', '',
+    '[mailbox]', `reports_folder = ${settings.mailbox.reports_folder}`, `archive_folder = ${settings.mailbox.archive_folder}`,
+    `watch = ${settings.mailbox.watch ? 'True' : 'False'}`, 'delete = False', 'delete_aggregate = False',
+    'delete_failure = False', 'delete_smtp_tls = False', 'delete_invalid = False', '',
+    '[imap]', `host = ${settings.mailbox.host}`, `port = ${settings.mailbox.port}`, `ssl = ${settings.mailbox.ssl ? 'True' : 'False'}`,
+    `user = ${settings.mailbox.username}`, `password = ${secrets.imap_password || ''}`, '',
+    '[opensearch]', `hosts = ${settings.opensearch_url}`, `user = ${settings.opensearch_username}`,
+    `password = ${process.env.OPENSEARCH_PASSWORD || ''}`, `ssl = ${settings.opensearch_url.startsWith('https:') ? 'True' : 'False'}`,
+    `skip_certificate_verification = ${settings.opensearch_verify_tls ? 'False' : 'True'}`, 'number_of_replicas = 0', ''
+  ];
+  return lines.join('\n');
 }
 
 function getSettings() {
@@ -102,26 +196,36 @@ function getSettings() {
 
 async function saveSettings(value) {
   const settings = normalizeSettings(value);
-  const directory = path.dirname(SETTINGS_PATH);
-  const temporary = `${SETTINGS_PATH}.tmp`;
-  await fs.promises.mkdir(directory, { recursive: true });
-  await fs.promises.writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-  await fs.promises.rename(temporary, SETTINGS_PATH);
+  const secrets = readSecrets();
+  if (value.mailbox?.password) secrets.imap_password = textValue(value.mailbox.password, '', 4096);
+  if (value.mailbox?.clear_password === true) delete secrets.imap_password;
+  if (settings.mailbox.enabled && (!settings.mailbox.host || !settings.mailbox.username || !secrets.imap_password)) throw new Error('IMAP host, username, and password are required when report collection is enabled');
+  await atomicWrite(SECRETS_PATH, `${JSON.stringify(secrets, null, 2)}\n`);
+  await atomicWrite(SETTINGS_PATH, `${JSON.stringify(settings, null, 2)}\n`);
+  await atomicWrite(PARSEDMARC_CONFIG_PATH, parsedmarcIni(settings, secrets));
   runtimeSettings = settings;
   requestTimeoutMs = settings.request_timeout_ms;
   scheduleRefresh(settings.refresh_minutes);
-  return settings;
+  let snapshot_notice = null;
+  if (settings.report_source === 'standalone') {
+    try { await configureSnapshots(settingsConfig(settings).opensearch, settings.snapshots); }
+    catch (error) { snapshot_notice = `Settings were saved, but the snapshot policy could not be updated: ${error.message}`; }
+  }
+  return { ...publicSettings(settings), snapshot_notice, parsedmarc_restart_required: settings.report_source === 'standalone' };
 }
 
 function settingsConfig(settings = getSettings()) {
   return {
     opensearch: {
-      enabled: settings.opensearch_enabled,
-      url: process.env.OPENSEARCH_URL || 'http://parsedmarc-opensearch:9200',
-      index: process.env.OPENSEARCH_INDEX || 'dmarc_aggregate*',
-      username: process.env.OPENSEARCH_USERNAME || 'admin',
+      enabled: settings.report_source !== 'disabled',
+      url: settings.opensearch_url,
+      index: settings.opensearch_aggregate_index,
+      aggregate_index: settings.opensearch_aggregate_index,
+      failure_index: settings.opensearch_failure_index,
+      smtp_tls_index: settings.opensearch_smtp_tls_index,
+      username: settings.opensearch_username,
       password: process.env.OPENSEARCH_PASSWORD || '',
-      verify_tls: String(process.env.OPENSEARCH_VERIFY_TLS || 'false').toLowerCase() === 'true'
+      verify_tls: settings.opensearch_verify_tls
     },
     domains: settings.monitored_domains.map(domain => ({
       domain,
@@ -240,14 +344,47 @@ async function dkim(domain, selectors) {
   return result('dkim', 'DKIM', status, `${keys.length - bad.length}/${keys.length} selectors healthy`, bad.map(v => `${v.selector}: ${v.issue}`).join('; ') || 'Every configured selector publishes a usable key.', status === 'healthy' ? 'Retire old selectors only after mail has aged out.' : 'Replace missing, revoked, or weak keys.', { selectors: keys });
 }
 
-function osRequest(config, endpoint, method = 'GET', body = null) {
-  const url = new URL(`${config.url.replace(/\/$/, '')}/${config.index}/${endpoint}`); const payload = body === null ? null : Buffer.from(JSON.stringify(body)); const auth = Buffer.from(`${config.username}:${config.password}`).toString('base64');
+function osApiRequest(config, resource, method = 'GET', body = null) {
+  const url = new URL(`${config.url.replace(/\/$/, '')}/${resource.replace(/^\//, '')}`); const payload = body === null ? null : Buffer.from(JSON.stringify(body)); const auth = Buffer.from(`${config.username}:${config.password}`).toString('base64');
   return new Promise((resolve, reject) => {
     const headers = { authorization: `Basic ${auth}`, accept: 'application/json' }; if (payload) { headers['content-type'] = 'application/json'; headers['content-length'] = payload.length; }
     const req = (url.protocol === 'https:' ? https : http).request(url, { method, timeout: requestTimeoutMs, rejectUnauthorized: config.verify_tls, headers }, res => {
       const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => { try { const data = JSON.parse(Buffer.concat(chunks)); const reason = data.error?.root_cause?.[0]?.reason || data.error?.caused_by?.reason || data.error?.reason; res.statusCode < 300 ? resolve(data) : reject(new Error(reason || `OpenSearch HTTP ${res.statusCode}`)); } catch (e) { reject(e); } });
     }); req.on('timeout', () => req.destroy(new Error('OpenSearch timed out'))); req.on('error', reject); req.end(payload || undefined);
   });
+}
+
+function osRequest(config, endpoint, method = 'GET', body = null, index = config.index) {
+  return osApiRequest(config, `${index}/${endpoint}`, method, body);
+}
+
+async function configureSnapshots(config, settings) {
+  if (!settings.enabled) {
+    try { await osApiRequest(config, '_plugins/_sm/policies/mailposture/_stop', 'POST', {}); } catch (_) {}
+    return;
+  }
+  await osApiRequest(config, '_snapshot/mailposture', 'PUT', { type: 'fs', settings: { location: '/usr/share/opensearch/snapshots', compress: true } });
+  const policy = {
+    description: 'MailPosture automated OpenSearch snapshots',
+    creation: { schedule: { cron: { expression: settings.cron, timezone: settings.timezone } }, time_limit: '1h' },
+    deletion: {
+      schedule: { cron: { expression: settings.delete_cron, timezone: settings.timezone } },
+      condition: { max_age: `${settings.retention_days}d`, min_count: settings.min_count, max_count: settings.max_count },
+      time_limit: '1h', snapshot_pattern: 'mailposture-*'
+    },
+    snapshot_config: {
+      date_format: 'yyyy-MM-dd-HH-mm', timezone: settings.timezone, indices: '*', repository: 'mailposture',
+      ignore_unavailable: 'true', include_global_state: 'true', partial: 'false'
+    }
+  };
+  let current = null;
+  try { current = await osApiRequest(config, '_plugins/_sm/policies/mailposture'); } catch (_) {}
+  if (current?._seq_no !== undefined && current?._primary_term !== undefined) {
+    await osApiRequest(config, `_plugins/_sm/policies/mailposture?if_seq_no=${current._seq_no}&if_primary_term=${current._primary_term}`, 'PUT', policy);
+  } else {
+    await osApiRequest(config, '_plugins/_sm/policies/mailposture', 'POST', policy);
+  }
+  await osApiRequest(config, '_plugins/_sm/policies/mailposture/_start', 'POST', {});
 }
 
 function selectSourceField(fields = {}) {
@@ -270,20 +407,55 @@ async function reports(domain, config, days) {
     const sourceField = await sourceAggregationField(config);
     const failedAggregations = { total: { sum: { field: 'message_count' } } };
     if (sourceField) failedAggregations.sources = { terms: { field: sourceField, size: 5 }, aggs: { messages: { sum: { field: 'message_count' } } } };
-    const data = await osRequest(config, '_search', 'POST', { size: 0, query: { bool: { must: [{ range: { date_begin: { gte: `now-${days}d` } } }, { match_phrase: { header_from: domain } }] } }, aggs: { total: { sum: { field: 'message_count' } }, passed: { filter: { term: { passed_dmarc: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: failedAggregations } } });
+    const data = await osRequest(config, '_search', 'POST', { size: 0, query: { bool: { must: [{ range: { date_begin: { gte: `now-${days}d` } } }, { match_phrase: { header_from: domain } }] } }, aggs: { total: { sum: { field: 'message_count' } }, passed: { filter: { term: { passed_dmarc: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, dkim_passed: { filter: { term: { passed_dkim: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, spf_passed: { filter: { term: { passed_spf: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: failedAggregations }, timeline: { date_histogram: { field: 'date_begin', calendar_interval: 'day', min_doc_count: 0 }, aggs: { total: { sum: { field: 'message_count' } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: { total: { sum: { field: 'message_count' } } } } } } } });
     const total = data.aggregations?.total?.value || 0; const passed = data.aggregations?.passed?.total?.value || 0; const failed = data.aggregations?.failed?.total?.value || 0; const rate = total ? Math.round(passed / total * 1000) / 10 : null; const sources = (data.aggregations?.failed?.sources?.buckets || []).map(v => ({ ip: v.key, messages: v.messages?.value || v.doc_count })); const status = !total ? 'warning' : rate < 90 ? 'critical' : rate < 98 ? 'warning' : 'healthy';
     const mappingNote = sourceField ? '' : ' Source-IP ranking is unavailable because the field is not aggregatable in these indices.';
-    return result('dmarc_reports', 'DMARC reports', status, total ? `${rate}% aligned` : 'No recent reports', (total ? `${Math.round(failed)} of ${Math.round(total)} messages failed in ${days} days.` : 'No matching aggregate reports were found.') + mappingNote, total && status !== 'healthy' ? (sourceField ? 'Review top failing sources and align legitimate senders.' : 'Review failing records in parsedmarc and align legitimate senders.') : 'Watch for new failing sources.', { period_days: days, total, failed, pass_rate: rate, source_field: sourceField, top_failing_sources: sources });
+    const timeline = (data.aggregations?.timeline?.buckets || []).map(bucket => ({ date: bucket.key_as_string, total: Math.round(bucket.total?.value || 0), failed: Math.round(bucket.failed?.total?.value || 0) }));
+    const dkimPassed = data.aggregations?.dkim_passed?.total?.value || 0; const spfPassed = data.aggregations?.spf_passed?.total?.value || 0;
+    return result('dmarc_reports', 'DMARC reports', status, total ? `${rate}% aligned` : 'No recent reports', (total ? `${Math.round(failed)} of ${Math.round(total)} messages failed in ${days} days.` : 'No matching aggregate reports were found.') + mappingNote, total && status !== 'healthy' ? (sourceField ? 'Review top failing sources and align legitimate senders.' : 'Review failing records in parsedmarc and align legitimate senders.') : 'Watch for new failing sources.', { period_days: days, total: Math.round(total), passed: Math.round(passed), failed: Math.round(failed), pass_rate: rate, dkim_pass_rate: total ? Math.round(dkimPassed / total * 1000) / 10 : null, spf_pass_rate: total ? Math.round(spfPassed / total * 1000) / 10 : null, source_field: sourceField, top_failing_sources: sources, timeline });
   } catch (error) { return result('dmarc_reports', 'DMARC reports', 'warning', 'OpenSearch query failed', error.message, 'Verify the OpenSearch environment variables and parsedmarc index.'); }
 }
 
-function summarize(domain, checks) { const rank = { healthy: 0, info: 1, warning: 2, critical: 3 }; return { domain, status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'), checks, counts: { critical: checks.filter(v => v.status === 'critical').length, warning: checks.filter(v => v.status === 'warning').length, healthy: checks.filter(v => v.status === 'healthy').length } }; }
-async function checkDomain(entry, config) {
-  const dm = await dmarc(entry.domain); const [sts, tlsreport, brand, keys, aggregate, ...certs] = await Promise.all([mtaSts(entry.domain), tlsRpt(entry.domain), bimi(entry.domain, dm), dkim(entry.domain, entry.dkim_selectors), reports(entry.domain, config.opensearch, entry.report_days), ...entry.tls_endpoints.map(certificate)]);
-  if (!certs.length) certs.push(result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
-  return summarize(entry.domain, [dm, aggregate, keys, sts, tlsreport, ...certs, brand]);
+async function failureReports(domain, config, days) {
+  if (!config.enabled) return { available: false, count: 0, reason: 'OpenSearch disabled' };
+  try {
+    const data = await osRequest(config, '_search', 'POST', { size: 0, query: { bool: { must: [{ range: { arrival_date_utc: { gte: `now-${days}d` } } }, { match_phrase: { reported_domain: domain } }] } } }, config.failure_index);
+    return { available: true, count: data.hits?.total?.value || 0, period_days: days, privacy_note: 'Failure-report message samples are not displayed because they can contain personal or confidential content.' };
+  } catch (error) { return { available: false, count: 0, error: error.message, period_days: days }; }
 }
-function demo() { return summarize('example.com', [result('dmarc','DMARC','warning','quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,246 messages failed in 7 days.','Review the top failing sources.'), result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','Reports enabled','SMTP TLS failures have a report destination.','Review TLS reports.'), result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465}), result('bimi','BIMI','warning','Self-asserted logo','No mark certificate is published.','Consider a VMC or CMC.')]); }
+
+function summarizeSmtpHits(hits, domain, days) {
+  const timeline = new Map(); const failures = new Map(); const organizations = new Map(); let successful = 0; let failed = 0; let reports = 0;
+  for (const hit of hits || []) {
+    const source = hit._source || hit; const date = String(source.date_begin || source.begin_date || '').slice(0, 10);
+    for (const policy of source.policies || []) {
+      if (String(policy.policy_domain || '').toLowerCase() !== domain.toLowerCase()) continue;
+      reports += 1; const pass = Number(policy.successful_session_count || policy.summary?.total_successful_session_count || 0); const fail = Number(policy.failed_session_count || policy.summary?.total_failure_session_count || 0);
+      successful += pass; failed += fail;
+      if (date) { const day = timeline.get(date) || { date, successful: 0, failed: 0 }; day.successful += pass; day.failed += fail; timeline.set(date, day); }
+      const organization = source.organization_name || 'Unknown reporter'; organizations.set(organization, (organizations.get(organization) || 0) + pass + fail);
+      for (const detail of policy.failure_details || []) { const type = detail.result_type || 'unspecified'; failures.set(type, (failures.get(type) || 0) + Number(detail.failed_session_count || 0)); }
+    }
+  }
+  const total = successful + failed;
+  return { available: true, period_days: days, reports, successful, failed, success_rate: total ? Math.round(successful / total * 1000) / 10 : null, timeline: [...timeline.values()].sort((a, b) => a.date.localeCompare(b.date)), failure_types: [...failures].map(([type, count]) => ({ type, count })).sort((a, b) => b.count - a.count).slice(0, 8), organizations: [...organizations].map(([name, sessions]) => ({ name, sessions })).sort((a, b) => b.sessions - a.sessions).slice(0, 8) };
+}
+
+async function smtpTlsReports(domain, config, days) {
+  if (!config.enabled) return { available: false, reports: 0, reason: 'OpenSearch disabled' };
+  try {
+    const data = await osRequest(config, '_search', 'POST', { size: 500, _source: ['organization_name', 'date_begin', 'begin_date', 'policies'], query: { range: { date_begin: { gte: `now-${days}d` } } }, sort: [{ date_begin: 'desc' }] }, config.smtp_tls_index);
+    return summarizeSmtpHits(data.hits?.hits || [], domain, days);
+  } catch (error) { return { available: false, reports: 0, error: error.message, period_days: days }; }
+}
+
+function summarize(domain, checks, reportSections = {}) { const rank = { healthy: 0, info: 1, warning: 2, critical: 3 }; return { domain, status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'), checks, reports: reportSections, counts: { critical: checks.filter(v => v.status === 'critical').length, warning: checks.filter(v => v.status === 'warning').length, healthy: checks.filter(v => v.status === 'healthy').length } }; }
+async function checkDomain(entry, config) {
+  const dm = await dmarc(entry.domain); const [sts, tlsreport, brand, keys, aggregate, failures, smtpTls, ...certs] = await Promise.all([mtaSts(entry.domain), tlsRpt(entry.domain), bimi(entry.domain, dm), dkim(entry.domain, entry.dkim_selectors), reports(entry.domain, config.opensearch, entry.report_days), failureReports(entry.domain, config.opensearch, entry.report_days), smtpTlsReports(entry.domain, config.opensearch, entry.report_days), ...entry.tls_endpoints.map(certificate)]);
+  if (!certs.length) certs.push(result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
+  return summarize(entry.domain, [dm, aggregate, keys, sts, tlsreport, ...certs, brand], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls });
+}
+function demo() { const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',messages:620},{ip:'198.51.100.8',messages:381}] }; const aggregateCheck = result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,249 messages failed in 7 days.','Review the top failing sources.',aggregate); return summarize('example.com', [result('dmarc','DMARC','warning','quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','Reports enabled','SMTP TLS failures have a report destination.','Review TLS reports.'), result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465}), result('bimi','BIMI','warning','Self-asserted logo','No mark certificate is published.','Consider a VMC or CMC.')], { aggregate, failure:{available:true,count:2,period_days:7}, smtp_tls:{available:true,reports:4,successful:8200,failed:14,success_rate:99.8,timeline:[{date:'2026-08-30',successful:1800,failed:6},{date:'2026-09-01',successful:3200,failed:5},{date:'2026-09-02',successful:3200,failed:3}],failure_types:[{type:'validation-failure',count:9},{type:'starttls-not-supported',count:5}],organizations:[{name:'Example Reporter',sessions:8214}] } }); }
 
 async function refresh() {
   if (activeRefresh) return activeRefresh; snapshot.refreshing = true;
@@ -299,10 +471,10 @@ const server = http.createServer(async (req,res) => {
   if (pathname === '/healthz') return json(res, snapshot.error ? 503 : 200, { ok: !snapshot.error, version: APP_VERSION, uptime_seconds: Math.floor((Date.now()-startedAt)/1000) });
   if (pathname === '/api/status' && req.method === 'GET') return json(res,200,snapshot);
   if (pathname === '/api/refresh' && req.method === 'POST') return json(res,202,await refresh());
-  if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, getSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }
+  if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, publicSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }
   if (pathname === '/api/settings' && req.method === 'PUT') { try { const settings = await saveSettings(await requestJson(req)); if (activeRefresh) await activeRefresh; await refresh(); return json(res, 200, settings); } catch (error) { return json(res, 400, { error: error.message }); } }
   staticFile(req,res);
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarize, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, parsedmarcIni, validCron, summarize, refresh, getSnapshot:()=>snapshot };

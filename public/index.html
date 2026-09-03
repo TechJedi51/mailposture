@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.4.0</small></span>
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.5.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a href="/" data-route="/">Dashboard</a>
@@ -44,6 +44,10 @@
       <div class="heading"><div><small>Domain scores</small><h2>Posture by domain</h2></div><p>Select a domain for its full control matrix.</p></div>
       <div id="domain-scores" class="domain-scores"></div>
     </section>
+    <section class="overview-section report-overview">
+      <div class="heading"><div><small>Reports</small><h2>Organization report summary</h2></div><p>DMARC authentication and SMTP TLS delivery results for the selected history window.</p></div>
+      <div id="organization-reports" class="report-grid"></div>
+    </section>
     <section class="overview-section dashboard-attention">
       <div class="heading"><div><small>Attention</small><h2>Open issues by domain</h2></div><span id="master-issue-count" class="pill"></span></div>
       <div id="master-attention" class="attention-groups"></div>
@@ -54,6 +58,10 @@
     <section id="hero" class="hero"></section>
     <nav id="domains" aria-label="Domains"></nav>
     <section id="attention" class="attention"></section>
+    <section class="report-center">
+      <div class="heading"><div><small>Report center</small><h2>Observed email traffic</h2></div><p>Parsed by parsedmarc and stored in OpenSearch.</p></div>
+      <div id="domain-reports" class="report-grid"></div>
+    </section>
     <section class="matrix">
       <div class="heading"><div><small>Control matrix</small><h2>Everything at a glance</h2></div><p>Open a control for evidence and its next step.</p></div>
       <div id="checks" class="checks"></div>
@@ -86,8 +94,44 @@
         <div class="field"><label for="report-days">Report history (days)</label><input id="report-days" type="number" min="1" max="365" required></div>
         <div class="field"><label for="refresh-minutes">Refresh interval (minutes)</label><input id="refresh-minutes" type="number" min="1" max="1440" required></div>
         <div class="field"><label for="request-timeout">Request timeout (milliseconds)</label><input id="request-timeout" type="number" min="1000" max="60000" step="100" required></div>
-        <label class="toggle"><input id="opensearch-enabled" type="checkbox"><span>Use OpenSearch DMARC reports</span></label>
-        <p class="settings-note">The OpenSearch address and credentials remain deployment environment variables so secrets are not stored in this file.</p>
+      </section>
+
+      <section class="settings-panel">
+        <div><h2>Report source</h2><p>Use the bundled report services or connect MailPosture to an existing OpenSearch service.</p></div>
+        <div class="field"><label for="report-source">Source</label><select id="report-source"><option value="standalone">Bundled services</option><option value="external">External OpenSearch</option><option value="disabled">Live checks only</option></select></div>
+        <div id="opensearch-fields" class="nested-settings">
+          <div class="field"><label for="opensearch-url">OpenSearch URL</label><input id="opensearch-url" type="url" placeholder="http://parsedmarc-opensearch:9200"></div>
+          <div class="field"><label for="opensearch-username">Username</label><input id="opensearch-username" type="text" autocomplete="username"></div>
+          <label class="toggle"><input id="opensearch-verify-tls" type="checkbox"><span>Verify the OpenSearch TLS certificate</span></label>
+          <details><summary>Index patterns</summary><div class="nested-settings compact-settings"><div class="field"><label for="aggregate-index">DMARC aggregate</label><input id="aggregate-index" type="text"></div><div class="field"><label for="failure-index">DMARC failure</label><input id="failure-index" type="text"></div><div class="field"><label for="smtp-tls-index">SMTP TLS</label><input id="smtp-tls-index" type="text"></div></div></details>
+        </div>
+        <p class="settings-note">The OpenSearch password remains a Dockhand secret. MailPosture never returns it to the browser.</p>
+      </section>
+
+      <section class="settings-panel" id="collector-panel">
+        <div><h2>Report mailbox</h2><p>parsedmarc watches one mailbox and sorts processed messages into the archive folders shown in your screenshot.</p></div>
+        <label class="toggle"><input id="mailbox-enabled" type="checkbox"><span>Collect DMARC and SMTP TLS reports</span></label>
+        <div id="mailbox-fields" class="nested-settings">
+          <div class="field"><label for="imap-host">IMAP server</label><input id="imap-host" type="text" autocomplete="off" placeholder="imap.example.com"></div>
+          <div class="two-fields"><div class="field"><label for="imap-port">Port</label><input id="imap-port" type="number" min="1" max="65535"></div><label class="toggle"><input id="imap-ssl" type="checkbox"><span>Use TLS</span></label></div>
+          <div class="field"><label for="imap-username">Username</label><input id="imap-username" type="text" autocomplete="username"></div>
+          <div class="field"><label for="imap-password">Password</label><input id="imap-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep the saved password"><p id="imap-password-status"></p></div>
+          <div class="two-fields"><div class="field"><label for="reports-folder">Incoming reports folder</label><input id="reports-folder" type="text" value="INBOX"></div><div class="field"><label for="archive-folder">Archive folder</label><input id="archive-folder" type="text" value="Archive"></div></div>
+          <p class="folder-preview"><strong>Managed archive folders</strong><span id="archive-preview">Archive/Aggregate · Failure · Invalid · SMTP-TLS · Unsaved</span></p>
+        </div>
+        <p class="settings-note">One mailbox can receive reports for every monitored domain. Use aliases that deliver to this account rather than creating one account per domain.</p>
+      </section>
+
+      <section class="settings-panel" id="snapshot-panel">
+        <div><h2>OpenSearch snapshots</h2><p>Schedule automated snapshots and retention with OpenSearch’s built-in snapshot manager.</p></div>
+        <label class="toggle"><input id="snapshots-enabled" type="checkbox"><span>Keep automated snapshots</span></label>
+        <div id="snapshot-fields" class="nested-settings">
+          <div class="field"><label for="snapshot-cron">Snapshot schedule</label><input id="snapshot-cron" type="text" placeholder="0 2 * * *"><p>Five-field cron expression.</p></div>
+          <div class="field"><label for="snapshot-delete-cron">Cleanup schedule</label><input id="snapshot-delete-cron" type="text" placeholder="30 2 * * *"></div>
+          <div class="field"><label for="snapshot-timezone">Time zone</label><input id="snapshot-timezone" type="text" placeholder="America/Los_Angeles"></div>
+          <div class="three-fields"><div class="field"><label for="snapshot-retention">Keep for days</label><input id="snapshot-retention" type="number" min="1" max="3650"></div><div class="field"><label for="snapshot-min">Minimum</label><input id="snapshot-min" type="number" min="1" max="1000"></div><div class="field"><label for="snapshot-max">Maximum</label><input id="snapshot-max" type="number" min="1" max="10000"></div></div>
+        </div>
+        <p class="settings-note">Snapshots protect OpenSearch data from application errors. Copy the snapshot folder to separate storage for protection from host or disk failure.</p>
       </section>
       <div class="settings-actions"><span id="settings-message" role="status"></span><button type="submit">Save settings</button></div>
     </form>
@@ -112,10 +156,11 @@
       <div class="heading"><div><small>Checks</small><h2>What MailPosture evaluates</h2></div></div>
       <div class="glossary-grid">
         <article><h3>DMARC</h3><p>Checks whether the domain publishes one valid DMARC policy, its enforcement level, coverage percentage, and aggregate-report destination.</p></article>
-        <article><h3>DMARC reports</h3><p>Uses parsedmarc data in OpenSearch to show recent message volume, alignment rate, failures, and top failing sources when available.</p></article>
+        <article><h3>DMARC aggregate reports</h3><p>Shows message volume, DMARC, DKIM, and SPF alignment, trends, and the top failing sources without exposing message content.</p></article>
+        <article><h3>DMARC failure reports</h3><p>Shows the number of individual failure reports. MailPosture intentionally does not display message samples because they can contain personal or confidential content.</p></article>
         <article><h3>DKIM</h3><p>Checks each configured selector for a published public key and reports missing, revoked, or weak RSA keys. Selectors must be entered because DNS cannot reliably discover them.</p></article>
         <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, and whether the policy covers every published MX host.</p></article>
-        <article><h3>TLS reporting</h3><p>Checks for a valid TLS-RPT record so other mail systems can report SMTP encryption and certificate failures.</p></article>
+        <article><h3>TLS reporting</h3><p>Checks for a valid TLS-RPT record and summarizes SMTP TLS successes, failures, reporting organizations, and failure types from parsedmarc.</p></article>
         <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS on ports 25 and 587 is not currently tested.</p></article>
         <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published.</p></article>
       </div>
@@ -132,7 +177,7 @@
         <div><dt>Posture score</dt><dd>A summary indicator weighted by control status. It helps prioritize work but does not replace the evidence shown for each check.</dd></div>
       </dl>
     </section>
-    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and optional OpenSearch report data. It does not change DNS, mail servers, messages, or OpenSearch records. Saving Settings changes only MailPosture’s local configuration.</p></section>
+    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and OpenSearch report data. In the standalone deployment, saving Settings also writes parsedmarc’s configuration and manages the OpenSearch snapshot policy. parsedmarc—not MailPosture—moves report messages into its Archive subfolders.</p></section>
   </main>
 
   <dialog id="detail-dialog"><button class="close" type="button" aria-label="Close">×</button><div id="detail"></div></dialog>
@@ -157,7 +202,7 @@
     </form>
   </dialog>
 
-  <footer><span>MailPosture</span><span>Read-only checks · settings stored locally</span></footer>
+  <footer><span>MailPosture</span><span>Actionable email security monitoring</span></footer>
   <script src="/app.js" defer></script>
 </body>
 </html>
