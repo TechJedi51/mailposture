@@ -62,6 +62,12 @@ function boundedNumber(value, fallback, min, max, label) {
   return Math.round(number);
 }
 
+function boundedDecimal(value, fallback, min, max, label) {
+  const number = Number(value ?? fallback);
+  if (!Number.isFinite(number) || number < min || number > max) throw new Error(`${label} must be between ${min} and ${max}`);
+  return number;
+}
+
 function textValue(value, fallback = '', max = 2048) {
   const normalized = String(value ?? fallback).trim();
   if (normalized.length > max || /[\r\n]/.test(normalized)) throw new Error('Settings contain an invalid text value');
@@ -110,11 +116,18 @@ function normalizeSettings(input = {}) {
   const snapshotDeleteCron = textValue(input.snapshots?.delete_cron, input.snapshot_delete_cron || '30 2 * * *', 100);
   if (!validCron(snapshotCron) || !validCron(snapshotDeleteCron)) throw new Error('Snapshot schedules must use five-field cron expressions');
   const mailbox = input.mailbox || {};
+  const parsedmarc = input.parsedmarc || {};
+  const parsedmarcGeneral = parsedmarc.general || {};
+  const parsedmarcMailbox = parsedmarc.mailbox || {};
+  const parsedmarcImap = parsedmarc.imap || {};
+  const parsedmarcOpensearch = parsedmarc.opensearch || {};
+  const since = textValue(parsedmarcMailbox.since, '1d', 20);
+  if (!/^\d+[mhdw]$/i.test(since)) throw new Error('Mailbox lookback must be a number followed by m, h, d, or w');
   const snapshotMin = boundedNumber(input.snapshots?.min_count, 7, 1, 1000, 'Minimum snapshots');
   const snapshotMax = boundedNumber(input.snapshots?.max_count, 60, 1, 10000, 'Maximum snapshots');
   if (snapshotMin > snapshotMax) throw new Error('Minimum snapshots cannot exceed maximum snapshots');
   return {
-    schema_version: 2,
+    schema_version: 3,
     monitored_domains: domains,
     dkim_selectors: selectors,
     tls_endpoints: endpoints,
@@ -141,6 +154,47 @@ function normalizeSettings(input = {}) {
       archive_folder: textValue(mailbox.archive_folder, 'Archive', 255),
       watch: mailbox.watch !== false,
       password_set: false
+    },
+    parsedmarc: {
+      general: {
+        save_aggregate: parsedmarcGeneral.save_aggregate !== false,
+        save_failure: parsedmarcGeneral.save_failure !== false,
+        save_smtp_tls: parsedmarcGeneral.save_smtp_tls !== false,
+        strip_attachment_payloads: parsedmarcGeneral.strip_attachment_payloads === true,
+        offline: parsedmarcGeneral.offline === true,
+        always_use_local_files: parsedmarcGeneral.always_use_local_files === true,
+        silent: parsedmarcGeneral.silent !== false,
+        warnings: parsedmarcGeneral.warnings !== false,
+        verbose: parsedmarcGeneral.verbose === true,
+        debug: parsedmarcGeneral.debug === true,
+        fail_on_output_error: parsedmarcGeneral.fail_on_output_error === true,
+        n_procs: boundedNumber(parsedmarcGeneral.n_procs, 1, 1, 64, 'Parser processes'),
+        dns_timeout: boundedDecimal(parsedmarcGeneral.dns_timeout, 2, 0.1, 120, 'DNS timeout'),
+        dns_retries: boundedNumber(parsedmarcGeneral.dns_retries, 0, 0, 20, 'DNS retries')
+      },
+      mailbox: {
+        test: parsedmarcMailbox.test === true,
+        delete: parsedmarcMailbox.delete === true,
+        delete_aggregate: parsedmarcMailbox.delete_aggregate === true,
+        delete_failure: parsedmarcMailbox.delete_failure === true,
+        delete_smtp_tls: parsedmarcMailbox.delete_smtp_tls === true,
+        delete_invalid: parsedmarcMailbox.delete_invalid === true,
+        batch_size: boundedNumber(parsedmarcMailbox.batch_size, 10, 0, 10000, 'Mailbox batch size'),
+        check_timeout: boundedNumber(parsedmarcMailbox.check_timeout, 30, 1, 3600, 'Mailbox check timeout'),
+        max_unsaved_retries: boundedNumber(parsedmarcMailbox.max_unsaved_retries, 2, 0, 100, 'Unsaved retries'),
+        since
+      },
+      imap: {
+        skip_certificate_verification: parsedmarcImap.skip_certificate_verification === true,
+        timeout: boundedNumber(parsedmarcImap.timeout, 30, 1, 3600, 'IMAP timeout'),
+        max_retries: boundedNumber(parsedmarcImap.max_retries, 4, 0, 100, 'IMAP retries')
+      },
+      opensearch: {
+        timeout: boundedNumber(parsedmarcOpensearch.timeout, 60, 1, 3600, 'OpenSearch output timeout'),
+        monthly_indexes: parsedmarcOpensearch.monthly_indexes === true,
+        number_of_shards: boundedNumber(parsedmarcOpensearch.number_of_shards, 1, 1, 100, 'OpenSearch shards'),
+        number_of_replicas: boundedNumber(parsedmarcOpensearch.number_of_replicas, 0, 0, 100, 'OpenSearch replicas')
+      }
     },
     snapshots: {
       enabled: input.snapshots?.enabled === undefined ? reportSource === 'standalone' : input.snapshots.enabled === true,
@@ -172,16 +226,46 @@ async function atomicWrite(filename, content, mode = 0o600) {
 
 function parsedmarcIni(settings, secrets = {}) {
   if (!settings.mailbox.enabled) return '# Mailbox collection is disabled in MailPosture.\n';
+  const value = input => String(input ?? '').replace(/%/g, '%%');
+  const bool = input => input ? 'True' : 'False';
+  const pm = settings.parsedmarc;
   const lines = [
-    '[general]', 'save_aggregate = True', 'save_failure = True', 'save_smtp_tls = True', '',
-    '[mailbox]', `reports_folder = ${settings.mailbox.reports_folder}`, `archive_folder = ${settings.mailbox.archive_folder}`,
-    `watch = ${settings.mailbox.watch ? 'True' : 'False'}`, 'delete = False', 'delete_aggregate = False',
-    'delete_failure = False', 'delete_smtp_tls = False', 'delete_invalid = False', '',
-    '[imap]', `host = ${settings.mailbox.host}`, `port = ${settings.mailbox.port}`, `ssl = ${settings.mailbox.ssl ? 'True' : 'False'}`,
-    `user = ${settings.mailbox.username}`, `password = ${secrets.imap_password || ''}`, '',
-    '[opensearch]', `hosts = ${settings.opensearch_url}`, `user = ${settings.opensearch_username}`,
-    `password = ${process.env.OPENSEARCH_PASSWORD || ''}`, `ssl = ${settings.opensearch_url.startsWith('https:') ? 'True' : 'False'}`,
-    `skip_certificate_verification = ${settings.opensearch_verify_tls ? 'False' : 'True'}`, 'number_of_replicas = 0', ''
+    '[general]',
+    `save_aggregate = ${bool(pm.general.save_aggregate)}`,
+    `save_failure = ${bool(pm.general.save_failure)}`,
+    `save_smtp_tls = ${bool(pm.general.save_smtp_tls)}`,
+    `strip_attachment_payloads = ${bool(pm.general.strip_attachment_payloads)}`,
+    `offline = ${bool(pm.general.offline)}`,
+    `always_use_local_files = ${bool(pm.general.always_use_local_files)}`,
+    `silent = ${bool(pm.general.silent)}`,
+    `warnings = ${bool(pm.general.warnings)}`,
+    `verbose = ${bool(pm.general.verbose)}`,
+    `debug = ${bool(pm.general.debug)}`,
+    `fail_on_output_error = ${bool(pm.general.fail_on_output_error)}`,
+    `n_procs = ${pm.general.n_procs}`,
+    `dns_timeout = ${pm.general.dns_timeout}`,
+    `dns_retries = ${pm.general.dns_retries}`, '',
+    '[mailbox]', `reports_folder = ${value(settings.mailbox.reports_folder)}`, `archive_folder = ${value(settings.mailbox.archive_folder)}`,
+    `watch = ${bool(settings.mailbox.watch)}`, `test = ${bool(pm.mailbox.test)}`, `delete = ${bool(pm.mailbox.delete)}`,
+    `delete_aggregate = ${bool(pm.mailbox.delete_aggregate)}`,
+    `delete_failure = ${bool(pm.mailbox.delete_failure)}`,
+    `delete_smtp_tls = ${bool(pm.mailbox.delete_smtp_tls)}`,
+    `delete_invalid = ${bool(pm.mailbox.delete_invalid)}`,
+    `batch_size = ${pm.mailbox.batch_size}`,
+    `check_timeout = ${pm.mailbox.check_timeout}`,
+    `max_unsaved_retries = ${pm.mailbox.max_unsaved_retries}`,
+    `since = ${value(pm.mailbox.since)}`, '',
+    '[imap]', `host = ${value(settings.mailbox.host)}`, `port = ${settings.mailbox.port}`, `ssl = ${bool(settings.mailbox.ssl)}`,
+    `skip_certificate_verification = ${bool(pm.imap.skip_certificate_verification)}`,
+    `timeout = ${pm.imap.timeout}`, `max_retries = ${pm.imap.max_retries}`,
+    `user = ${value(settings.mailbox.username)}`, `password = ${value(secrets.imap_password || '')}`, '',
+    '[opensearch]', `hosts = ${value(settings.opensearch_url)}`, `user = ${value(settings.opensearch_username)}`,
+    `password = ${value(process.env.OPENSEARCH_PASSWORD || '')}`, `ssl = ${bool(settings.opensearch_url.startsWith('https:'))}`,
+    `skip_certificate_verification = ${bool(!settings.opensearch_verify_tls)}`,
+    `timeout = ${pm.opensearch.timeout}`,
+    `monthly_indexes = ${bool(pm.opensearch.monthly_indexes)}`,
+    `number_of_shards = ${pm.opensearch.number_of_shards}`,
+    `number_of_replicas = ${pm.opensearch.number_of_replicas}`, ''
   ];
   return lines.join('\n');
 }
@@ -211,7 +295,13 @@ async function saveSettings(value) {
     try { await configureSnapshots(settingsConfig(settings).opensearch, settings.snapshots); }
     catch (error) { snapshot_notice = `Settings were saved, but the snapshot policy could not be updated: ${error.message}`; }
   }
-  return { ...publicSettings(settings), snapshot_notice, parsedmarc_restart_required: settings.report_source === 'standalone' };
+  return {
+    ...publicSettings(settings),
+    snapshot_notice,
+    parsedmarc_config_path: PARSEDMARC_CONFIG_PATH,
+    parsedmarc_reload_automatic: settings.report_source === 'standalone',
+    parsedmarc_reload_seconds: settings.report_source === 'standalone' ? 10 : null
+  };
 }
 
 function settingsConfig(settings = getSettings()) {

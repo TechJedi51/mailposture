@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#0a0f0e">
+  <meta name="theme-color" content="#07111b">
   <title>MailPosture</title>
   <link rel="icon" href="/mailposture.svg" type="image/svg+xml">
   <script>
@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.5.0</small></span>
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.6.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a href="/" data-route="/">Dashboard</a>
@@ -58,7 +58,7 @@
     <section id="hero" class="hero"></section>
     <nav id="domains" aria-label="Domains"></nav>
     <section id="attention" class="attention"></section>
-    <section class="report-center">
+    <section class="report-center" id="report-center" tabindex="-1">
       <div class="heading"><div><small>Report center</small><h2>Observed email traffic</h2></div><p>Parsed by parsedmarc and stored in OpenSearch.</p></div>
       <div id="domain-reports" class="report-grid"></div>
     </section>
@@ -75,64 +75,79 @@
       <p>Manage domains and monitoring behavior. Changes are saved on this server and survive container updates.</p>
     </section>
     <form id="settings-form" class="settings-form">
-      <section class="settings-panel domains-panel">
-        <div class="panel-heading">
-          <div><h2>Monitored domains</h2><p>Add each domain used in a From address. Select edit to manage its DKIM selectors and TLS certificates.</p></div>
-          <button class="symbol-button add-symbol" id="add-domain" type="button" aria-label="Add domain" title="Add domain">＋</button>
+      <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button id="settings-tab-domains" role="tab" type="button" aria-selected="true" aria-controls="settings-panel-domains" data-settings-tab="domains">Monitored domains</button>
+        <button id="settings-tab-appearance" role="tab" type="button" aria-selected="false" aria-controls="settings-panel-appearance" data-settings-tab="appearance" tabindex="-1">Appearance</button>
+        <button id="settings-tab-opensearch" role="tab" type="button" aria-selected="false" aria-controls="settings-panel-opensearch" data-settings-tab="opensearch" tabindex="-1">OpenSearch</button>
+        <button id="settings-tab-parsedmarc" role="tab" type="button" aria-selected="false" aria-controls="settings-panel-parsedmarc" data-settings-tab="parsedmarc" tabindex="-1">parsedmarc</button>
+      </div>
+
+      <section id="settings-panel-domains" class="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-domains">
+        <div class="settings-panel domains-panel">
+          <div class="panel-heading"><div><h2>Monitored domains</h2><p>Add each domain used in a From address. Select edit to manage its DKIM selectors and TLS certificates.</p></div><button class="symbol-button add-symbol" id="add-domain" type="button" aria-label="Add domain" title="Add domain">＋</button></div>
+          <div id="settings-domain-list" class="editable-list"></div>
         </div>
-        <div id="settings-domain-list" class="editable-list"></div>
+        <div class="settings-panel">
+          <div><h2>Monitoring behavior</h2><p>Choose how much report history to show and how often MailPosture runs its checks.</p></div>
+          <div class="three-fields"><div class="field"><label for="report-days">Report history (days)</label><input id="report-days" type="number" min="1" max="365" required></div><div class="field"><label for="refresh-minutes">Refresh interval (minutes)</label><input id="refresh-minutes" type="number" min="1" max="1440" required></div><div class="field"><label for="request-timeout">Request timeout (milliseconds)</label><input id="request-timeout" type="number" min="1000" max="60000" step="100" required></div></div>
+        </div>
       </section>
 
-      <section class="settings-panel preferences-panel">
-        <div><h2>Appearance</h2><p>System follows this device’s appearance setting.</p></div>
-        <fieldset class="theme-picker">
-          <legend>Color mode</legend>
-          <label><input type="radio" name="theme" value="light"><span>☀ Light</span></label>
-          <label><input type="radio" name="theme" value="dark"><span>◐ Dark</span></label>
-          <label><input type="radio" name="theme" value="system"><span>◑ System</span></label>
-        </fieldset>
-        <div class="field"><label for="report-days">Report history (days)</label><input id="report-days" type="number" min="1" max="365" required></div>
-        <div class="field"><label for="refresh-minutes">Refresh interval (minutes)</label><input id="refresh-minutes" type="number" min="1" max="1440" required></div>
-        <div class="field"><label for="request-timeout">Request timeout (milliseconds)</label><input id="request-timeout" type="number" min="1000" max="60000" step="100" required></div>
+      <section id="settings-panel-appearance" class="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-appearance" hidden>
+        <div class="settings-panel preferences-panel">
+          <div><h2>Appearance</h2><p>System follows this device’s appearance setting.</p></div>
+          <fieldset class="theme-picker"><legend>Color mode</legend><label><input type="radio" name="theme" value="light"><span>☀ Light</span></label><label><input type="radio" name="theme" value="dark"><span>◐ Dark</span></label><label><input type="radio" name="theme" value="system"><span>◑ System</span></label></fieldset>
+          <p class="settings-note">MailPosture uses SEAL Systems blue for controls and navigation. Status colors remain distinct: red needs action, yellow needs review, and green is healthy.</p>
+        </div>
       </section>
 
-      <section class="settings-panel">
-        <div><h2>Report source</h2><p>Use the bundled report services or connect MailPosture to an existing OpenSearch service.</p></div>
-        <div class="field"><label for="report-source">Source</label><select id="report-source"><option value="standalone">Bundled services</option><option value="external">External OpenSearch</option><option value="disabled">Live checks only</option></select></div>
-        <div id="opensearch-fields" class="nested-settings">
-          <div class="field"><label for="opensearch-url">OpenSearch URL</label><input id="opensearch-url" type="url" placeholder="http://parsedmarc-opensearch:9200"></div>
-          <div class="field"><label for="opensearch-username">Username</label><input id="opensearch-username" type="text" autocomplete="username"></div>
-          <label class="toggle"><input id="opensearch-verify-tls" type="checkbox"><span>Verify the OpenSearch TLS certificate</span></label>
-          <details><summary>Index patterns</summary><div class="nested-settings compact-settings"><div class="field"><label for="aggregate-index">DMARC aggregate</label><input id="aggregate-index" type="text"></div><div class="field"><label for="failure-index">DMARC failure</label><input id="failure-index" type="text"></div><div class="field"><label for="smtp-tls-index">SMTP TLS</label><input id="smtp-tls-index" type="text"></div></div></details>
+      <section id="settings-panel-opensearch" class="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-opensearch" hidden>
+        <div class="settings-panel">
+          <div><h2>Report source</h2><p>Use the bundled report services or connect MailPosture to an existing OpenSearch service.</p></div>
+          <div class="field"><label for="report-source">Source</label><select id="report-source"><option value="standalone">Bundled services</option><option value="external">External OpenSearch</option><option value="disabled">Live checks only</option></select></div>
+          <div id="opensearch-fields" class="nested-settings">
+            <div class="field"><label for="opensearch-url">OpenSearch URL</label><input id="opensearch-url" type="url" placeholder="http://parsedmarc-opensearch:9200"></div>
+            <div class="field"><label for="opensearch-username">Username</label><input id="opensearch-username" type="text" autocomplete="username"></div>
+            <label class="toggle"><input id="opensearch-verify-tls" type="checkbox"><span>Verify the OpenSearch TLS certificate</span></label>
+            <details><summary>Index patterns</summary><div class="nested-settings compact-settings"><div class="field"><label for="aggregate-index">DMARC aggregate</label><input id="aggregate-index" type="text"></div><div class="field"><label for="failure-index">DMARC failure</label><input id="failure-index" type="text"></div><div class="field"><label for="smtp-tls-index">SMTP TLS</label><input id="smtp-tls-index" type="text"></div></div></details>
+          </div>
+          <p class="settings-note">The OpenSearch password remains a Dockhand secret. MailPosture never returns it to the browser.</p>
         </div>
-        <p class="settings-note">The OpenSearch password remains a Dockhand secret. MailPosture never returns it to the browser.</p>
+        <div class="settings-panel" id="snapshot-panel">
+          <div><h2>OpenSearch snapshots</h2><p>Schedule automated snapshots and retention with OpenSearch’s built-in snapshot manager.</p></div>
+          <label class="toggle"><input id="snapshots-enabled" type="checkbox"><span>Keep automated snapshots</span></label>
+          <div id="snapshot-fields" class="nested-settings"><div class="field"><label for="snapshot-cron">Snapshot schedule</label><input id="snapshot-cron" type="text" placeholder="0 2 * * *"><p>Five-field cron expression.</p></div><div class="field"><label for="snapshot-delete-cron">Cleanup schedule</label><input id="snapshot-delete-cron" type="text" placeholder="30 2 * * *"></div><div class="field"><label for="snapshot-timezone">Time zone</label><input id="snapshot-timezone" type="text" placeholder="America/Los_Angeles"></div><div class="three-fields"><div class="field"><label for="snapshot-retention">Keep for days</label><input id="snapshot-retention" type="number" min="1" max="3650"></div><div class="field"><label for="snapshot-min">Minimum</label><input id="snapshot-min" type="number" min="1" max="1000"></div><div class="field"><label for="snapshot-max">Maximum</label><input id="snapshot-max" type="number" min="1" max="10000"></div></div></div>
+          <p class="settings-note">Snapshots protect OpenSearch data from application errors. Copy the snapshot folder to separate storage for protection from host or disk failure.</p>
+        </div>
       </section>
 
-      <section class="settings-panel" id="collector-panel">
-        <div><h2>Report mailbox</h2><p>parsedmarc watches one mailbox and sorts processed messages into the archive folders shown in your screenshot.</p></div>
-        <label class="toggle"><input id="mailbox-enabled" type="checkbox"><span>Collect DMARC and SMTP TLS reports</span></label>
-        <div id="mailbox-fields" class="nested-settings">
-          <div class="field"><label for="imap-host">IMAP server</label><input id="imap-host" type="text" autocomplete="off" placeholder="imap.example.com"></div>
-          <div class="two-fields"><div class="field"><label for="imap-port">Port</label><input id="imap-port" type="number" min="1" max="65535"></div><label class="toggle"><input id="imap-ssl" type="checkbox"><span>Use TLS</span></label></div>
-          <div class="field"><label for="imap-username">Username</label><input id="imap-username" type="text" autocomplete="username"></div>
-          <div class="field"><label for="imap-password">Password</label><input id="imap-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep the saved password"><p id="imap-password-status"></p></div>
-          <div class="two-fields"><div class="field"><label for="reports-folder">Incoming reports folder</label><input id="reports-folder" type="text" value="INBOX"></div><div class="field"><label for="archive-folder">Archive folder</label><input id="archive-folder" type="text" value="Archive"></div></div>
-          <p class="folder-preview"><strong>Managed archive folders</strong><span id="archive-preview">Archive/Aggregate · Failure · Invalid · SMTP-TLS · Unsaved</span></p>
+      <section id="settings-panel-parsedmarc" class="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-parsedmarc" hidden>
+        <div class="settings-panel" id="collector-panel">
+          <div><h2>Report mailbox</h2><p>parsedmarc reads the incoming folder, writes normalized reports to OpenSearch, and archives processed messages.</p></div>
+          <label class="toggle"><input id="mailbox-enabled" type="checkbox"><span>Collect DMARC and SMTP TLS reports</span></label>
+          <div id="mailbox-fields" class="nested-settings">
+            <div class="field"><label for="imap-host">IMAP server</label><input id="imap-host" type="text" autocomplete="off" placeholder="imap.example.com"></div>
+            <div class="two-fields"><div class="field"><label for="imap-port">Port</label><input id="imap-port" type="number" min="1" max="65535"></div><label class="toggle"><input id="imap-ssl" type="checkbox"><span>Use TLS</span></label></div>
+            <div class="field"><label for="imap-username">Username</label><input id="imap-username" type="text" autocomplete="username"></div>
+            <div class="field"><label for="imap-password">Password</label><input id="imap-password" type="password" autocomplete="new-password" placeholder="Leave blank to keep the saved password"><p id="imap-password-status"></p></div>
+            <div class="two-fields"><div class="field"><label for="reports-folder">Incoming reports folder</label><input id="reports-folder" type="text" value="INBOX"></div><div class="field"><label for="archive-folder">Archive folder</label><input id="archive-folder" type="text" value="Archive"></div></div>
+            <label class="toggle"><input id="pm-watch" type="checkbox"><span>Continue watching for new reports</span></label>
+            <p class="folder-preview"><strong>Managed archive folders</strong><span id="archive-preview">Archive/Aggregate · Archive/Failure · Archive/Invalid · Archive/SMTP-TLS · Archive/Unsaved</span></p>
+            <p class="settings-note"><strong>SMTP TLS flow:</strong> parsedmarc moves processed TLS-RPT messages to <span id="smtp-tls-folder">Archive/SMTP-TLS</span>. MailPosture reads their normalized results from the configured <code>smtp_tls*</code> OpenSearch index.</p>
+          </div>
+          <p class="settings-note">One mailbox can receive reports for every monitored domain. Use aliases that deliver to this account rather than creating one account per domain.</p>
         </div>
-        <p class="settings-note">One mailbox can receive reports for every monitored domain. Use aliases that deliver to this account rather than creating one account per domain.</p>
+
+        <div class="settings-panel">
+          <div><h2>Parser and output</h2><p>These supported parsedmarc options are written to the active <code>config.ini</code> file when you save.</p></div>
+          <details open><summary>Report types and runtime</summary><div class="nested-settings compact-settings option-grid"><label class="toggle"><input id="pm-save-aggregate" type="checkbox"><span>Save DMARC aggregate reports</span></label><label class="toggle"><input id="pm-save-failure" type="checkbox"><span>Save DMARC failure reports</span></label><label class="toggle"><input id="pm-save-smtp-tls" type="checkbox"><span>Save SMTP TLS reports</span></label><label class="toggle"><input id="pm-strip-attachments" type="checkbox"><span>Strip attachment payloads</span></label><label class="toggle"><input id="pm-offline" type="checkbox"><span>Offline mode</span></label><label class="toggle"><input id="pm-local-files" type="checkbox"><span>Always use local files</span></label><label class="toggle"><input id="pm-silent" type="checkbox"><span>Silent mode</span></label><label class="toggle"><input id="pm-warnings" type="checkbox"><span>Show warnings</span></label><label class="toggle"><input id="pm-verbose" type="checkbox"><span>Verbose logging</span></label><label class="toggle"><input id="pm-debug" type="checkbox"><span>Debug logging</span></label><label class="toggle"><input id="pm-fail-output" type="checkbox"><span>Fail on output error</span></label><div class="three-fields"><div class="field"><label for="pm-n-procs">Parser processes</label><input id="pm-n-procs" type="number" min="1" max="64"></div><div class="field"><label for="pm-dns-timeout">DNS timeout (seconds)</label><input id="pm-dns-timeout" type="number" min="0.1" max="120" step="0.1"></div><div class="field"><label for="pm-dns-retries">DNS retries</label><input id="pm-dns-retries" type="number" min="0" max="20"></div></div></div></details>
+          <details><summary>Mailbox processing</summary><div class="nested-settings compact-settings option-grid"><label class="toggle"><input id="pm-test" type="checkbox"><span>Test mode</span></label><label class="toggle"><input id="pm-delete" type="checkbox"><span>Delete processed messages by default</span></label><label class="toggle"><input id="pm-delete-aggregate" type="checkbox"><span>Delete aggregate reports</span></label><label class="toggle"><input id="pm-delete-failure" type="checkbox"><span>Delete failure reports</span></label><label class="toggle"><input id="pm-delete-smtp-tls" type="checkbox"><span>Delete SMTP TLS reports</span></label><label class="toggle"><input id="pm-delete-invalid" type="checkbox"><span>Delete invalid reports</span></label><div class="field"><label for="pm-batch-size">Batch size</label><input id="pm-batch-size" type="number" min="0" max="10000"><p>Set to 0 for no limit.</p></div><div class="field"><label for="pm-check-timeout">Check timeout (seconds)</label><input id="pm-check-timeout" type="number" min="1" max="3600"></div><div class="field"><label for="pm-max-unsaved">Unsaved retries</label><input id="pm-max-unsaved" type="number" min="0" max="100"></div><div class="field"><label for="pm-since">Look back</label><input id="pm-since" type="text" placeholder="1d"><p>Use a number plus m, h, d, or w.</p></div></div></details>
+          <details><summary>IMAP connection</summary><div class="nested-settings compact-settings option-grid"><label class="toggle"><input id="pm-imap-skip-verify" type="checkbox"><span>Skip IMAP certificate verification</span></label><div class="field"><label for="pm-imap-timeout">IMAP timeout (seconds)</label><input id="pm-imap-timeout" type="number" min="1" max="3600"></div><div class="field"><label for="pm-imap-max-retries">IMAP retries</label><input id="pm-imap-max-retries" type="number" min="0" max="100"></div></div></details>
+          <details><summary>OpenSearch output</summary><div class="nested-settings compact-settings option-grid"><label class="toggle"><input id="pm-monthly-indexes" type="checkbox"><span>Use monthly indexes</span></label><div class="field"><label for="pm-os-timeout">Output timeout (seconds)</label><input id="pm-os-timeout" type="number" min="1" max="3600"></div><div class="field"><label for="pm-shards">Shards</label><input id="pm-shards" type="number" min="1" max="100"></div><div class="field"><label for="pm-replicas">Replicas</label><input id="pm-replicas" type="number" min="0" max="100"></div></div></details>
+          <p class="settings-note">Deletion options remove mailbox messages after processing. Leave them off to preserve the Archive folders. Less common outputs such as Kafka, S3, Splunk, and Microsoft Graph remain file-based advanced configuration and are not managed by this screen.</p>
+        </div>
       </section>
 
-      <section class="settings-panel" id="snapshot-panel">
-        <div><h2>OpenSearch snapshots</h2><p>Schedule automated snapshots and retention with OpenSearch’s built-in snapshot manager.</p></div>
-        <label class="toggle"><input id="snapshots-enabled" type="checkbox"><span>Keep automated snapshots</span></label>
-        <div id="snapshot-fields" class="nested-settings">
-          <div class="field"><label for="snapshot-cron">Snapshot schedule</label><input id="snapshot-cron" type="text" placeholder="0 2 * * *"><p>Five-field cron expression.</p></div>
-          <div class="field"><label for="snapshot-delete-cron">Cleanup schedule</label><input id="snapshot-delete-cron" type="text" placeholder="30 2 * * *"></div>
-          <div class="field"><label for="snapshot-timezone">Time zone</label><input id="snapshot-timezone" type="text" placeholder="America/Los_Angeles"></div>
-          <div class="three-fields"><div class="field"><label for="snapshot-retention">Keep for days</label><input id="snapshot-retention" type="number" min="1" max="3650"></div><div class="field"><label for="snapshot-min">Minimum</label><input id="snapshot-min" type="number" min="1" max="1000"></div><div class="field"><label for="snapshot-max">Maximum</label><input id="snapshot-max" type="number" min="1" max="10000"></div></div>
-        </div>
-        <p class="settings-note">Snapshots protect OpenSearch data from application errors. Copy the snapshot folder to separate storage for protection from host or disk failure.</p>
-      </section>
       <div class="settings-actions"><span id="settings-message" role="status"></span><button type="submit">Save settings</button></div>
     </form>
   </main>
@@ -160,7 +175,7 @@
         <article><h3>DMARC failure reports</h3><p>Shows the number of individual failure reports. MailPosture intentionally does not display message samples because they can contain personal or confidential content.</p></article>
         <article><h3>DKIM</h3><p>Checks each configured selector for a published public key and reports missing, revoked, or weak RSA keys. Selectors must be entered because DNS cannot reliably discover them.</p></article>
         <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, and whether the policy covers every published MX host.</p></article>
-        <article><h3>TLS reporting</h3><p>Checks for a valid TLS-RPT record and summarizes SMTP TLS successes, failures, reporting organizations, and failure types from parsedmarc.</p></article>
+        <article><h3>TLS reporting</h3><p>Checks for a valid TLS-RPT record and summarizes SMTP TLS successes, failures, reporting organizations, and failure types from parsedmarc. Processed TLS-RPT messages normally move to <code>Archive/SMTP-TLS</code>; MailPosture reads the normalized OpenSearch data.</p></article>
         <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS on ports 25 and 587 is not currently tested.</p></article>
         <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published.</p></article>
       </div>
@@ -177,7 +192,7 @@
         <div><dt>Posture score</dt><dd>A summary indicator weighted by control status. It helps prioritize work but does not replace the evidence shown for each check.</dd></div>
       </dl>
     </section>
-    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and OpenSearch report data. In the standalone deployment, saving Settings also writes parsedmarc’s configuration and manages the OpenSearch snapshot policy. parsedmarc—not MailPosture—moves report messages into its Archive subfolders.</p></section>
+    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and OpenSearch report data. In the standalone deployment, saving Settings writes parsedmarc’s active configuration, triggers an automatic parsedmarc reload, and manages the OpenSearch snapshot policy. parsedmarc—not MailPosture—moves report messages into its Archive subfolders.</p></section>
   </main>
 
   <dialog id="detail-dialog"><button class="close" type="button" aria-label="Close">×</button><div id="detail"></div></dialog>

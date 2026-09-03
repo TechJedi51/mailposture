@@ -46,27 +46,29 @@ function rankedList(items, nameKey, valueKey, emptyText) {
   return `<ol class="ranked-list">${items.map(item => `<li><span>${esc(item[nameKey])}</span><strong>${number(item[valueKey])}</strong><span class="rank-bar"><i style="width:${Number(item[valueKey] || 0) / maximum * 100}%"></i></span></li>`).join('')}</ol>`;
 }
 
-function aggregateCard(report, wide = false) {
-  if (!report?.total) return `<article class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>Authentication results reported by receiving email services.</p></div></div><p class="report-empty">No aggregate report data was found for this period.</p></article>`;
+function reportId(id) { return id ? ` id="${esc(id)}" tabindex="-1"` : ''; }
+
+function aggregateCard(report, wide = false, id = '') {
+  if (!report?.total) return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>Authentication results reported by receiving email services.</p></div></div><p class="report-empty">No aggregate report data was found for this period.</p></article>`;
   const passed = Math.max(0, Number(report.total) - Number(report.failed || 0));
-  return `<article class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>${number(report.total)} messages observed over ${number(report.period_days)} days</p></div><span class="report-value">${report.pass_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.failed)}</strong><span>DMARC failures</span></div><div class="metric"><strong>${report.dkim_pass_rate ?? '—'}%</strong><span>DKIM aligned</span></div><div class="metric"><strong>${report.spf_pass_rate ?? '—'}%</strong><span>SPF aligned</span></div></div>${trendChart((report.timeline || []).map(item => ({...item, passed: Math.max(0, item.total - item.failed)})), 'passed', 'failed', `DMARC daily results: ${number(passed)} successful and ${number(report.failed)} failed`)}</article>`;
+  return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>${number(report.total)} messages observed over ${number(report.period_days)} days</p></div><span class="report-value">${report.pass_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.failed)}</strong><span>DMARC failures</span></div><div class="metric"><strong>${report.dkim_pass_rate ?? '—'}%</strong><span>DKIM aligned</span></div><div class="metric"><strong>${report.spf_pass_rate ?? '—'}%</strong><span>SPF aligned</span></div></div>${trendChart((report.timeline || []).map(item => ({...item, passed: Math.max(0, item.total - item.failed)})), 'passed', 'failed', `DMARC daily results: ${number(passed)} successful and ${number(report.failed)} failed`)}</article>`;
 }
 
-function smtpTlsCard(report) {
-  if (!report?.available || (!report.successful && !report.failed)) return '<article class="report-card"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>Transport security results reported by sending services.</p></div></div><p class="report-empty">No SMTP TLS report data was found for this period.</p></article>';
-  return `<article class="report-card"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>${number(report.reports)} reported policies</p></div><span class="report-value">${report.success_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.successful)}</strong><span>Successful sessions</span></div><div class="metric"><strong>${number(report.failed)}</strong><span>Failed sessions</span></div><div class="metric"><strong>${number(report.failure_types?.length)}</strong><span>Failure types</span></div></div>${trendChart(report.timeline, 'successful', 'failed', `SMTP TLS daily results: ${number(report.successful)} successful and ${number(report.failed)} failed`)}</article>`;
+function smtpTlsCard(report, id = '') {
+  if (!report?.available || (!report.successful && !report.failed)) return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>Transport security results reported by sending services.</p></div></div><p class="report-empty">No SMTP TLS report data was found for this period.</p></article>`;
+  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>${number(report.reports)} reported policies</p></div><span class="report-value">${report.success_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.successful)}</strong><span>Successful sessions</span></div><div class="metric"><strong>${number(report.failed)}</strong><span>Failed sessions</span></div><div class="metric"><strong>${number(report.failure_types?.length)}</strong><span>Failure types</span></div></div>${trendChart(report.timeline, 'successful', 'failed', `SMTP TLS daily results: ${number(report.successful)} successful and ${number(report.failed)} failed`)}</article>`;
 }
 
-function failureCard(report) {
-  return `<article class="report-card"><div class="report-card-header"><div><h3>DMARC failure reports</h3><p>Individual authentication failure notices</p></div><span class="report-value">${report?.available ? number(report.count) : '—'}</span></div><p class="privacy-note">${esc(report?.privacy_note || report?.error || 'Failure report data is not available.')}</p></article>`;
+function failureCard(report, id = '') {
+  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>DMARC failure reports</h3><p>Individual authentication failure notices</p></div><span class="report-value">${report?.available ? number(report.count) : '—'}</span></div><p class="privacy-note">${esc(report?.privacy_note || report?.error || 'Failure report data is not available.')}</p></article>`;
 }
 
-function reportingOrganizationsCard(report) {
-  return `<article class="report-card"><div class="report-card-header"><div><h3>TLS reporting organizations</h3><p>Services that supplied SMTP TLS results</p></div></div>${rankedList(report?.organizations, 'name', 'sessions', 'No TLS reporting organizations were found.')}</article>`;
+function reportingOrganizationsCard(report, id = '') {
+  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>TLS reporting organizations</h3><p>Services that supplied SMTP TLS results</p></div></div>${rankedList(report?.organizations, 'name', 'sessions', 'No TLS reporting organizations were found.')}</article>`;
 }
 
 function detailCards(reports) {
-  return `${aggregateCard(reports?.aggregate, true)}${smtpTlsCard(reports?.smtp_tls)}${failureCard(reports?.failure)}<article class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages</p></div></div>${rankedList(reports?.aggregate?.top_failing_sources, 'ip', 'messages', 'No failing sources were reported.')}</article><article class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${reportingOrganizationsCard(reports?.smtp_tls)}`;
+  return `${aggregateCard(reports?.aggregate, true, 'report-dmarc')} ${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls')} ${failureCard(reports?.failure, 'report-dmarc-failure')}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages</p></div></div>${rankedList(reports?.aggregate?.top_failing_sources, 'ip', 'messages', 'No failing sources were reported.')}</article><article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}`;
 }
 
 function organizationReports(domains) {
@@ -92,7 +94,7 @@ function setTheme(mode, persist = true) {
   const resolved = normalized === 'system' ? (themeQuery.matches ? 'dark' : 'light') : normalized;
   document.documentElement.dataset.themeMode = normalized;
   document.documentElement.dataset.theme = resolved;
-  document.querySelector('meta[name="theme-color"]').content = resolved === 'dark' ? '#0a0f0e' : '#f3f7f5';
+  document.querySelector('meta[name="theme-color"]').content = resolved === 'dark' ? '#07111b' : '#f4f7fb';
   if (persist) localStorage.setItem('mailposture-theme', normalized);
   document.querySelectorAll('input[name="theme"]').forEach(input => { input.checked = input.value === normalized; });
 }
@@ -180,8 +182,15 @@ function detail(id) {
   const check = domain?.checks.find(value => value.id === id);
   if (!check) return;
   const endpoint = tlsEndpoint(check, domain.domain);
-  $('#detail').innerHTML = `<div class="detail"><span class="state ${check.status}">${names[check.status]}</span><h2>${esc(check.label)}</h2><p class="detail-domain">${esc(domain.domain)}${endpoint ? ` · ${esc(endpoint)}` : ''}</p><p class="summary">${esc(check.summary)}</p><div class="block"><h3>What this means</h3><p>${esc(check.detail)}</p></div><div class="block action"><h3>Next action</h3><p>${esc(check.action)}</p></div>${Object.keys(check.evidence || {}).length ? `<div class="block"><h3>Evidence</h3><pre>${esc(JSON.stringify(check.evidence, null, 2))}</pre></div>` : ''}</div>`;
+  const destination = reportDestination(check);
+  $('#detail').innerHTML = `<div class="detail"><span class="state ${check.status}">${names[check.status]}</span><h2>${esc(check.label)}</h2><p class="detail-domain">${esc(domain.domain)}${endpoint ? ` · ${esc(endpoint)}` : ''}</p><p class="summary">${esc(check.summary)}</p><div class="block"><h3>What this means</h3><p>${esc(check.detail)}</p></div><div class="block action"><h3>Next action</h3><p>${esc(check.action)}</p></div><a class="primary-link report-link" href="#${esc(destination.id)}" data-report-target="${esc(destination.id)}">${esc(destination.label)} →</a>${Object.keys(check.evidence || {}).length ? `<div class="block"><h3>Evidence</h3><pre>${esc(JSON.stringify(check.evidence, null, 2))}</pre></div>` : ''}</div>`;
   $('#detail-dialog').showModal();
+}
+
+function reportDestination(check) {
+  if (check.id === 'dmarc_reports' || check.id === 'dmarc' || check.id === 'dkim') return { id: 'report-dmarc', label: 'View DMARC reports' };
+  if (check.id === 'tls_rpt' || check.id === 'mta_sts' || check.id.startsWith('tls_')) return { id: 'report-smtp-tls', label: 'View SMTP TLS reports' };
+  return { id: 'report-center', label: 'View domain reports' };
 }
 
 async function loadStatus() {
@@ -228,7 +237,40 @@ async function loadSettings() {
   $('#imap-ssl').checked = settings.mailbox.ssl;
   $('#reports-folder').value = settings.mailbox.reports_folder;
   $('#archive-folder').value = settings.mailbox.archive_folder;
+  $('#pm-watch').checked = settings.mailbox.watch;
   $('#imap-password-status').textContent = settings.mailbox.password_set ? 'A password is saved. Leave this blank to keep it.' : 'No password is saved.';
+  const pm = settings.parsedmarc;
+  $('#pm-save-aggregate').checked = pm.general.save_aggregate;
+  $('#pm-save-failure').checked = pm.general.save_failure;
+  $('#pm-save-smtp-tls').checked = pm.general.save_smtp_tls;
+  $('#pm-strip-attachments').checked = pm.general.strip_attachment_payloads;
+  $('#pm-offline').checked = pm.general.offline;
+  $('#pm-local-files').checked = pm.general.always_use_local_files;
+  $('#pm-silent').checked = pm.general.silent;
+  $('#pm-warnings').checked = pm.general.warnings;
+  $('#pm-verbose').checked = pm.general.verbose;
+  $('#pm-debug').checked = pm.general.debug;
+  $('#pm-fail-output').checked = pm.general.fail_on_output_error;
+  $('#pm-n-procs').value = pm.general.n_procs;
+  $('#pm-dns-timeout').value = pm.general.dns_timeout;
+  $('#pm-dns-retries').value = pm.general.dns_retries;
+  $('#pm-test').checked = pm.mailbox.test;
+  $('#pm-delete').checked = pm.mailbox.delete;
+  $('#pm-delete-aggregate').checked = pm.mailbox.delete_aggregate;
+  $('#pm-delete-failure').checked = pm.mailbox.delete_failure;
+  $('#pm-delete-smtp-tls').checked = pm.mailbox.delete_smtp_tls;
+  $('#pm-delete-invalid').checked = pm.mailbox.delete_invalid;
+  $('#pm-batch-size').value = pm.mailbox.batch_size;
+  $('#pm-check-timeout').value = pm.mailbox.check_timeout;
+  $('#pm-max-unsaved').value = pm.mailbox.max_unsaved_retries;
+  $('#pm-since').value = pm.mailbox.since;
+  $('#pm-imap-skip-verify').checked = pm.imap.skip_certificate_verification;
+  $('#pm-imap-timeout').value = pm.imap.timeout;
+  $('#pm-imap-max-retries').value = pm.imap.max_retries;
+  $('#pm-os-timeout').value = pm.opensearch.timeout;
+  $('#pm-monthly-indexes').checked = pm.opensearch.monthly_indexes;
+  $('#pm-shards').value = pm.opensearch.number_of_shards;
+  $('#pm-replicas').value = pm.opensearch.number_of_replicas;
   $('#snapshots-enabled').checked = settings.snapshots.enabled;
   $('#snapshot-cron').value = settings.snapshots.cron;
   $('#snapshot-delete-cron').value = settings.snapshots.delete_cron;
@@ -245,12 +287,24 @@ async function loadSettings() {
 function updateSettingsVisibility() {
   const source = $('#report-source').value;
   $('#opensearch-fields').hidden = source === 'disabled';
-  $('#collector-panel').hidden = source !== 'standalone';
   $('#snapshot-panel').hidden = source !== 'standalone';
   $('#mailbox-fields').hidden = !$('#mailbox-enabled').checked;
   $('#snapshot-fields').hidden = !$('#snapshots-enabled').checked;
   const archive = $('#archive-folder').value.trim() || 'Archive';
   $('#archive-preview').textContent = `${archive}/Aggregate · ${archive}/Failure · ${archive}/Invalid · ${archive}/SMTP-TLS · ${archive}/Unsaved`;
+  $('#smtp-tls-folder').textContent = `${archive}/SMTP-TLS`;
+}
+
+function selectSettingsTab(name, focus = false) {
+  const tabs = [...document.querySelectorAll('[data-settings-tab]')];
+  const selected = tabs.find(tab => tab.dataset.settingsTab === name) || tabs[0];
+  tabs.forEach(tab => {
+    const active = tab === selected;
+    tab.setAttribute('aria-selected', String(active));
+    tab.tabIndex = active ? 0 : -1;
+    $(`#settings-panel-${tab.dataset.settingsTab}`).hidden = !active;
+  });
+  if (focus) selected.focus();
 }
 
 function renderEditorLists() {
@@ -368,7 +422,48 @@ async function saveSettings(event) {
         ssl: $('#imap-ssl').checked,
         reports_folder: $('#reports-folder').value.trim(),
         archive_folder: $('#archive-folder').value.trim(),
-        watch: true
+        watch: $('#pm-watch').checked
+      },
+      parsedmarc: {
+        general: {
+          save_aggregate: $('#pm-save-aggregate').checked,
+          save_failure: $('#pm-save-failure').checked,
+          save_smtp_tls: $('#pm-save-smtp-tls').checked,
+          strip_attachment_payloads: $('#pm-strip-attachments').checked,
+          offline: $('#pm-offline').checked,
+          always_use_local_files: $('#pm-local-files').checked,
+          silent: $('#pm-silent').checked,
+          warnings: $('#pm-warnings').checked,
+          verbose: $('#pm-verbose').checked,
+          debug: $('#pm-debug').checked,
+          fail_on_output_error: $('#pm-fail-output').checked,
+          n_procs: Number($('#pm-n-procs').value),
+          dns_timeout: Number($('#pm-dns-timeout').value),
+          dns_retries: Number($('#pm-dns-retries').value)
+        },
+        mailbox: {
+          test: $('#pm-test').checked,
+          delete: $('#pm-delete').checked,
+          delete_aggregate: $('#pm-delete-aggregate').checked,
+          delete_failure: $('#pm-delete-failure').checked,
+          delete_smtp_tls: $('#pm-delete-smtp-tls').checked,
+          delete_invalid: $('#pm-delete-invalid').checked,
+          batch_size: Number($('#pm-batch-size').value),
+          check_timeout: Number($('#pm-check-timeout').value),
+          max_unsaved_retries: Number($('#pm-max-unsaved').value),
+          since: $('#pm-since').value.trim()
+        },
+        imap: {
+          skip_certificate_verification: $('#pm-imap-skip-verify').checked,
+          timeout: Number($('#pm-imap-timeout').value),
+          max_retries: Number($('#pm-imap-max-retries').value)
+        },
+        opensearch: {
+          timeout: Number($('#pm-os-timeout').value),
+          monthly_indexes: $('#pm-monthly-indexes').checked,
+          number_of_shards: Number($('#pm-shards').value),
+          number_of_replicas: Number($('#pm-replicas').value)
+        }
       },
       snapshots: {
         enabled: $('#snapshots-enabled').checked,
@@ -386,7 +481,11 @@ async function saveSettings(event) {
     state.settings = clone(result);
     $('#imap-password').value = '';
     $('#imap-password-status').textContent = result.mailbox.password_set ? 'A password is saved. Leave this blank to keep it.' : 'No password is saved.';
-    message.textContent = result.snapshot_notice || (result.parsedmarc_restart_required ? 'Settings saved. Restart parsedmarc to apply mailbox changes.' : 'Settings saved. Checks have been refreshed.');
+    message.textContent = result.snapshot_notice || (result.parsedmarc_reload_automatic
+      ? `Settings saved. parsedmarc will reload the active configuration within ${result.parsedmarc_reload_seconds} seconds.`
+      : result.report_source === 'external'
+        ? 'Settings saved and parsedmarc configuration written. Restart the external parsedmarc service to apply it.'
+        : 'Settings saved. Historical report collection is disabled.');
     message.className = result.snapshot_notice ? 'pending' : 'success';
     renderSettingsDomains();
     await loadStatus();
@@ -444,11 +543,39 @@ $('#report-source').onchange = updateSettingsVisibility;
 $('#mailbox-enabled').onchange = updateSettingsVisibility;
 $('#snapshots-enabled').onchange = updateSettingsVisibility;
 $('#archive-folder').oninput = updateSettingsVisibility;
+$('#pm-delete').onchange = event => {
+  ['#pm-delete-aggregate', '#pm-delete-failure', '#pm-delete-smtp-tls', '#pm-delete-invalid'].forEach(selector => { $(selector).checked = event.target.checked; });
+};
+document.querySelectorAll('[data-settings-tab]').forEach(tab => {
+  tab.onclick = () => selectSettingsTab(tab.dataset.settingsTab);
+  tab.onkeydown = event => {
+    const tabs = [...document.querySelectorAll('[data-settings-tab]')];
+    const current = tabs.indexOf(tab);
+    let next = null;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (current + 1) % tabs.length;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (current - 1 + tabs.length) % tabs.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = tabs.length - 1;
+    if (next !== null) { event.preventDefault(); selectSettingsTab(tabs[next].dataset.settingsTab, true); }
+  };
+});
 themeQuery.addEventListener?.('change', () => { if ((localStorage.getItem('mailposture-theme') || 'system') === 'system') setTheme('system', false); });
 
 document.onclick = event => {
   const route = event.target.closest('[data-route]');
   if (route) { event.preventDefault(); showRoute(route.getAttribute('href'), true); return; }
+  const reportLink = event.target.closest('[data-report-target]');
+  if (reportLink) {
+    event.preventDefault();
+    const targetId = reportLink.dataset.reportTarget;
+    $('#detail-dialog').close();
+    requestAnimationFrame(() => {
+      const target = document.getElementById(targetId) || $('#report-center');
+      target?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+      target?.focus({ preventScroll: true });
+    });
+    return;
+  }
   const openDomain = event.target.closest('[data-open-domain]');
   if (openDomain) { state.selected = Number(openDomain.dataset.openDomain); showRoute('/domains', true); return; }
   const domain = event.target.closest('[data-domain]');

@@ -79,11 +79,40 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        while [ ! -s /etc/parsedmarc/config.ini ]; do
-          echo "Waiting for report mailbox settings to be saved in MailPosture"
-          sleep 30
+        child=""
+        stop_child() {
+          if [ -n "$$child" ]; then
+            kill -TERM "$$child" 2>/dev/null || true
+            wait "$$child" 2>/dev/null || true
+          fi
+          exit 0
+        }
+        trap stop_child TERM INT
+        while true; do
+          while ! grep -q '^\[mailbox\]' /etc/parsedmarc/config.ini 2>/dev/null; do
+            echo "Waiting for report mailbox settings to be enabled in MailPosture"
+            sleep 10
+          done
+          checksum="$$(cksum < /etc/parsedmarc/config.ini)"
+          parsedmarc -c /etc/parsedmarc/config.ini &
+          child="$$!"
+          while kill -0 "$$child" 2>/dev/null; do
+            sleep 10
+            updated="$$(cksum < /etc/parsedmarc/config.ini 2>/dev/null || true)"
+            if [ "$$updated" != "$$checksum" ]; then
+              echo "MailPosture settings changed; reloading parsedmarc"
+              kill -TERM "$$child" 2>/dev/null || true
+              wait "$$child" 2>/dev/null || true
+              child=""
+              break
+            fi
+          done
+          if [ -n "$$child" ]; then
+            wait "$$child" 2>/dev/null || true
+            child=""
+          fi
+          sleep 2
         done
-        exec parsedmarc -c /etc/parsedmarc/config.ini
     environment:
       PARSEDMARC_OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD}
     volumes:

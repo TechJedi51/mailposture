@@ -22,12 +22,12 @@ Use `docker-compose.yml` when parsedmarc and OpenSearch already exist. Use `comp
 
 - **Dashboard** shows the organization-wide score, domain scores, open issues, aggregate DMARC trends, DMARC failure-report counts, and SMTP TLS results.
 - **Domains** shows the detailed status, report center, attention queue, evidence, and control matrix for one domain at a time.
-- **Settings** manages domains, DKIM selectors, TLS certificate endpoints, report source, parsedmarc mailbox folders, snapshot scheduling, monitoring intervals, and appearance.
+- **Settings** separates monitored domains, appearance, OpenSearch, and parsedmarc configuration into accessible tabs with keyboard navigation.
 - **Help** explains setup, every check, and the terminology used by the application.
 
 ## Settings screen
 
-After the first deployment, select the gear button in MailPosture.
+After the first deployment, select the gear button in MailPosture. The Monitored domains, Appearance, OpenSearch, and parsedmarc tabs make room for each service's related options.
 
 ### Domains
 
@@ -62,7 +62,11 @@ Archive/
 └── Unsaved
 ```
 
-Saving Settings writes `/data/parsedmarc/config.ini`. The standalone Compose file shares that directory read-only with parsedmarc. Restart the parsedmarc service after changing mailbox settings. MailPosture does not parse, move, or delete report messages itself.
+Saving Settings writes `/data/parsedmarc/config.ini`. The standalone Compose file mounts that generated file at parsedmarc's active `/etc/parsedmarc/config.ini` path and reloads parsedmarc automatically within 10 seconds when it changes. An external parsedmarc deployment must mount the same generated directory—or copy the file to its configured path—and must be restarted by its own service manager.
+
+`Archive/SMTP-TLS` contains the original TLS-RPT messages after parsedmarc processes them. MailPosture does not read or parse that folder. It reads the normalized documents that parsedmarc writes to the configured `smtp_tls*` OpenSearch index, which prevents duplicate processing and mailbox conflicts.
+
+The parsedmarc tab manages the general, mailbox, IMAP, and OpenSearch options used by the bundled IMAP-to-OpenSearch pipeline. Less common outputs and collectors, including Kafka, S3, Splunk, Gmail API, and Microsoft Graph, remain advanced file-based configuration. MailPosture does not parse, move, or delete report messages itself; parsedmarc performs the configured mailbox actions.
 
 Failure reports can contain message headers or content. MailPosture shows counts but intentionally does not display those samples.
 
@@ -199,7 +203,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Open MailPosture, select the Settings button, add the monitored domains and their selectors and endpoints, then save. With the standalone stack, also enter the report mailbox and enable snapshots. Restart parsedmarc after the first save. Appearance preference is stored in the browser because it is specific to each device.
+Open MailPosture, select the Settings button, add the monitored domains and their selectors and endpoints, then save. With the standalone stack, also enter the report mailbox and enable snapshots. parsedmarc starts after the first valid mailbox configuration is saved and reloads automatically after later changes. Appearance preference is stored in the browser because it is specific to each device.
 
 `.env` is excluded by `.gitignore`. It must never be committed.
 
