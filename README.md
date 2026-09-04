@@ -22,7 +22,7 @@ Use `docker-compose.yml` when parsedmarc and OpenSearch already exist. Use `comp
 
 - **Dashboard** shows the organization-wide score, domain scores, open issues, stacked aggregate DMARC trends, optional DMARC failure-report counts, and stacked SMTP TLS results.
 - **Domains** shows the detailed status, report center, attention queue, evidence, and control matrix for one domain at a time.
-- **System Status** directly checks MailPosture storage and refreshes, OpenSearch authentication and cluster health, report indexes, the generated ParseDMARC configuration, and the bundled collector heartbeat. Its operational log records privacy-safe status changes for these checks without exposing unrestricted Docker logs or message content.
+- **System Status** directly checks MailPosture storage and refreshes, OpenSearch authentication and cluster health, report indexes, the generated ParseDMARC configuration, and the bundled collector heartbeat. It includes both a privacy-safe operational event log and bounded, redacted service-log views for the standalone MailPosture, OpenSearch, and ParseDMARC services.
 - **Settings** separates monitored domains, appearance, OpenSearch, and parsedmarc configuration into accessible tabs with keyboard navigation.
 - **Help** explains setup, every check, and the terminology used by the application.
 
@@ -71,19 +71,21 @@ The standalone stack also uses the small `parsedmarc_status` Docker volume for a
 
 DMARC aggregate failures and DMARC failure reports are different measurements. Aggregate reports count messages that failed DMARC. Failure reports, also called RUF or forensic reports, are optional individual reports that many receivers do not send. It is therefore normal for an aggregate report to show failed messages while the RUF report count is zero. MailPosture shows only RUF counts because those reports may contain personal or confidential message data.
 
-TLS reporting organizations are the outside mail providers that sent TLS-RPT data about delivery attempts to a monitored domain. Their values count SMTP sessions, not email messages. MailPosture shows the normalized organization name and session total and provides an expandable raw-data view of those fields.
+TLS reporting organizations are the outside mail providers that sent TLS-RPT data about delivery attempts to a monitored domain. Their values count SMTP sessions, not email messages. MailPosture recognizes current and legacy parsedmarc organization fields. When a report has no recognized name, the interface says **Reporter name not provided** and provides a limited raw-field view so you can verify what was stored without exposing policy details or message content.
+
+Top failing DMARC sources include the source IP address and, when available, parsedmarc's saved host name, base domain, and network owner. If no saved host name exists, MailPosture attempts a bounded reverse-DNS lookup. A PTR name is supporting context and is not proof that the named organization authorized the traffic.
 
 When BIMI publishes a safe SVG logo over HTTPS and passes validation, MailPosture displays it on the BIMI control card through a same-origin, sandboxed image response. Remote logo markup is not inserted into the page.
 
-The parsedmarc tab manages the general, mailbox, IMAP, and OpenSearch options used by the bundled IMAP-to-OpenSearch pipeline. Less common outputs and collectors, including Kafka, S3, Splunk, Gmail API, and Microsoft Graph, remain advanced file-based configuration. MailPosture does not parse, move, or delete report messages itself; parsedmarc performs the configured mailbox actions.
+The parsedmarc tab manages the general, mailbox, IMAP, and OpenSearch options used by the bundled IMAP-to-OpenSearch pipeline. Monthly indexes are enabled by default for new configurations to avoid creating a large number of small report indexes. For a single OpenSearch node, use one shard and zero replicas. Less common outputs and collectors, including Kafka, S3, Splunk, Gmail API, and Microsoft Graph, remain advanced file-based configuration. MailPosture does not parse, move, or delete report messages itself; parsedmarc performs the configured mailbox actions.
 
 ### System Status troubleshooting
 
-A yellow OpenSearch cluster is expected when a single-node cluster has replica shards configured because OpenSearch will not place a replica on the same node as its primary. Set **Replicas** to `0` under **Settings → ParseDMARC → OpenSearch output** for new indexes. Existing indexes must also have `index.number_of_replicas` changed to `0` through the OpenSearch `_settings` API. Multi-node clusters should normally retain replicas.
+A yellow OpenSearch cluster is expected when a single-node cluster has replica shards configured because OpenSearch will not place a replica on the same node as its primary. MailPosture inspects every unassigned shard and separates report indexes, OpenSearch security audit logs, internal indexes, and other indexes. When all unassigned shards are replicas and no MailPosture report shard is affected, the application reports the pipeline as operational while preserving the actual yellow cluster state in its evidence. Set **Replicas** to `0` under **Settings → ParseDMARC → OpenSearch output** for new report indexes. Existing indexes and OpenSearch-created audit/internal indexes require their own `index.number_of_replicas` setting or an appropriate cluster default. Multi-node clusters should normally retain replicas.
 
-An unavailable index pattern means OpenSearch has no matching index yet. Confirm that the corresponding report type is enabled in ParseDMARC and that matching messages reach the configured mailbox. The index appears after parsedmarc saves the first report. A missing RUF/forensic index can require no action because those reports are optional.
+The Report indexes card has **All domains** scope because its patterns query shared cluster indexes, not one selected domain. Each pattern appears on its own line and can be expanded to show the matching physical indexes, health, document count, primary shards, and replicas. An unavailable aggregate or SMTP TLS pattern means OpenSearch has no matching index yet; confirm that the report type is enabled and matching messages reach the mailbox. A missing individual DMARC failure (RUF) index is informational, not an error, because many providers never send these optional reports.
 
-The in-app operational log is intentionally limited to state changes detected by MailPosture. For full container output, run `docker logs --tail 200 mailposture`, `docker logs --tail 200 parsedmarc`, or `docker logs --tail 200 parsedmarc-opensearch` on the Docker host. Review logs before sharing them because they can contain host names, addresses, or message metadata.
+The in-app operational log is intentionally limited to state changes detected by MailPosture. The standalone Compose file also writes or mounts bounded service logs from MailPosture, OpenSearch, and ParseDMARC. MailPosture exposes only a fixed service list, reads the volumes without write access, limits the number and size of files returned, and redacts common password, token, secret, and authorization labels. This is defense in depth, not a guarantee that logs contain no sensitive metadata. Review logs before sharing them. External deployments leave service-log viewing disabled unless equivalent read-only mounts are configured.
 
 Failure reports can contain message headers or content. MailPosture shows counts but intentionally does not display those samples.
 
@@ -188,6 +190,7 @@ MAILPOSTURE_DATA_VOLUME=mailposture_data
 OPENSEARCH_VERSION=2
 PARSEDMARC_VERSION=latest
 OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+OPENSEARCH_LOG_VOLUME=mailposture_opensearch_logs
 MAILPOSTURE_SETTINGS_PATH=/srv/docker-data/mailposture
 OPENSEARCH_DATA_PATH=/srv/docker-data/parsedmarc/opensearch/data
 OPENSEARCH_SNAPSHOT_PATH=/srv/docker-data/parsedmarc/opensearch/snapshots
@@ -196,6 +199,16 @@ OPENSEARCH_SNAPSHOT_PATH=/srv/docker-data/parsedmarc/opensearch/snapshots
 The Compose files provide defaults for optional values. The three `*_PATH` variables are migration overrides: set them to absolute host paths to reuse MailPosture settings, OpenSearch data, or an existing snapshot repository, and omit them for the new default folders. Do not run snapshot jobs from two OpenSearch clusters against the same repository. The Settings screen can override the OpenSearch URL, username, index patterns, and certificate verification behavior. The password remains an environment secret.
 
 Use the lowercase owner and repository path shown on the GitHub package page for `MAILPOSTURE_IMAGE`.
+
+## Versioning
+
+MailPosture uses semantic versioning:
+
+- Bug fixes increment the third number, such as `1.1.2` to `1.1.3`.
+- Features increment the second number and reset the third number to zero, such as `1.2.1` to `1.3.0`.
+- Incompatible changes increment the first number.
+
+This feature release is version `1.1.0`.
 
 ## 5. Reverse proxy
 

@@ -16,6 +16,7 @@ services:
       OPENSEARCH_USERNAME: ${OPENSEARCH_USERNAME:-admin}
       OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:-}
       OPENSEARCH_VERIFY_TLS: ${OPENSEARCH_VERIFY_TLS:-false}
+      SERVICE_LOGS_ENABLED: ${SERVICE_LOGS_ENABLED:-false}
     volumes:
       - mailposture_data:/data:rw
     expose:

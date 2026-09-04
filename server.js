@@ -15,6 +15,12 @@ const SETTINGS_PATH = process.env.SETTINGS_PATH || '/data/settings.json';
 const SECRETS_PATH = process.env.SECRETS_PATH || '/data/secrets.json';
 const PARSEDMARC_CONFIG_PATH = process.env.PARSEDMARC_CONFIG_PATH || '/data/parsedmarc/config.ini';
 const PARSEDMARC_STATUS_PATH = process.env.PARSEDMARC_STATUS_PATH || '/run/parsedmarc/status.json';
+const SERVICE_LOGS_ENABLED = String(process.env.SERVICE_LOGS_ENABLED || 'false').toLowerCase() === 'true';
+const SERVICE_LOG_PATHS = {
+  mailposture: process.env.MAILPOSTURE_LOG_PATH || '/data/logs/mailposture.log',
+  opensearch: process.env.OPENSEARCH_LOG_PATH || '/logs/opensearch',
+  parsedmarc: process.env.PARSEDMARC_LOG_PATH || '/run/parsedmarc/parsedmarc.log'
+};
 const PUBLIC = path.join(__dirname, 'public');
 const startedAt = Date.now();
 let snapshot = { version: APP_VERSION, generated_at: null, refreshing: false, domains: [], summary: { critical: 0, warning: 0, healthy: 0 } };
@@ -26,6 +32,20 @@ const diagnosticEvents = [];
 const diagnosticStates = new Map();
 const bimiLogos = new Map();
 
+function redactLogText(value) {
+  return String(value || '')
+    .replace(/\u001b\[[0-9;]*m/g, '')
+    .replace(/((?:password|authorization|token|secret)["']?\s*[=:]\s*["']?)[^\s,;"']+/gi, '$1[REDACTED]');
+}
+
+function appendMailpostureLog(level, service, message, detail) {
+  if (!SERVICE_LOGS_ENABLED) return;
+  const line = `${new Date().toISOString()} [${level.toUpperCase()}] [${service}] ${message}${detail ? ` — ${detail}` : ''}\n`;
+  fs.promises.mkdir(path.dirname(SERVICE_LOG_PATHS.mailposture), { recursive: true })
+    .then(() => fs.promises.appendFile(SERVICE_LOG_PATHS.mailposture, redactLogText(line), { mode: 0o600 }))
+    .catch(() => {});
+}
+
 function addDiagnosticEvent(service, level, message, detail = '') {
   diagnosticEvents.push({
     id: crypto.randomUUID(),
@@ -36,6 +56,7 @@ function addDiagnosticEvent(service, level, message, detail = '') {
     detail
   });
   if (diagnosticEvents.length > 300) diagnosticEvents.splice(0, diagnosticEvents.length - 300);
+  appendMailpostureLog(level, service, message, detail);
 }
 
 function diagnosticService(check) {
@@ -57,6 +78,43 @@ function recordSystemChecks(checks) {
 
 function diagnosticLog() {
   return { generated_at: new Date().toISOString(), events: [...diagnosticEvents].reverse() };
+}
+
+async function tailLogFile(filename, maxBytes = 262144) {
+  const handle = await fs.promises.open(filename, 'r');
+  try {
+    const stat = await handle.stat();
+    const length = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, Math.max(0, stat.size - length));
+    return { name: path.basename(filename), updated_at: stat.mtime.toISOString(), content: redactLogText(buffer.toString('utf8')).replace(/^.*\n/, stat.size > length ? '' : '$&') };
+  } finally { await handle.close(); }
+}
+
+async function serviceLog(service) {
+  if (!SERVICE_LOGS_ENABLED) return { service, available: false, reason: 'Service log viewing is disabled. Enable SERVICE_LOGS_ENABLED and use the standalone log mounts.' };
+  const target = SERVICE_LOG_PATHS[service];
+  if (!target) return { service, available: false, reason: 'Unknown service.' };
+  try {
+    const stat = await fs.promises.stat(target);
+    if (stat.isFile()) {
+      const file = await tailLogFile(target);
+      return { service, available: true, files: [file] };
+    }
+    const entries = await fs.promises.readdir(target, { withFileTypes: true });
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !/\.(?:log|json|txt)$/i.test(entry.name)) continue;
+      const filename = path.join(target, entry.name);
+      const metadata = await fs.promises.stat(filename);
+      candidates.push({ filename, mtime: metadata.mtimeMs });
+    }
+    candidates.sort((a, b) => b.mtime - a.mtime);
+    const files = await Promise.all(candidates.slice(0, 8).map(candidate => tailLogFile(candidate.filename, 131072)));
+    return files.length ? { service, available: true, files } : { service, available: false, reason: 'No log files are available yet.' };
+  } catch (error) {
+    return { service, available: false, reason: error.code === 'ENOENT' ? 'The service log volume is not mounted.' : error.message };
+  }
 }
 
 function assignments(value) {
@@ -228,7 +286,7 @@ function normalizeSettings(input = {}) {
       },
       opensearch: {
         timeout: boundedNumber(parsedmarcOpensearch.timeout, 60, 1, 3600, 'OpenSearch output timeout'),
-        monthly_indexes: parsedmarcOpensearch.monthly_indexes === true,
+        monthly_indexes: parsedmarcOpensearch.monthly_indexes !== false,
         number_of_shards: boundedNumber(parsedmarcOpensearch.number_of_shards, 1, 1, 100, 'OpenSearch shards'),
         number_of_replicas: boundedNumber(parsedmarcOpensearch.number_of_replicas, 0, 0, 100, 'OpenSearch replicas')
       }
@@ -368,7 +426,7 @@ function envConfig() { return settingsConfig(settingsFromEnv()); }
 
 function result(id, label, status, summary, detail, action, evidence = {}) { return { id, label, status, summary, detail, action, evidence }; }
 function overallStatus(checks) {
-  const rank = { healthy: 0, warning: 1, critical: 2 };
+  const rank = { healthy: 0, info: 0, warning: 1, critical: 2 };
   return checks.reduce((current, check) => rank[check.status] > rank[current] ? check.status : current, 'healthy');
 }
 
@@ -384,6 +442,42 @@ function parsedmarcConfigurationStatus(settings, content, metadata = {}) {
 
 async function readJsonFile(filename) {
   return JSON.parse(await fs.promises.readFile(filename, 'utf8'));
+}
+
+function globPattern(pattern) {
+  const escaped = String(pattern).trim().replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`);
+}
+
+function matchesIndexPattern(index, patterns) {
+  return String(patterns || '').split(',').map(value => value.trim()).filter(Boolean).some(pattern => globPattern(pattern).test(index));
+}
+
+function unassignedShardSummary(shards, settings) {
+  const unassigned = shards.filter(shard => String(shard.state).toUpperCase() === 'UNASSIGNED');
+  const reportPatterns = [settings.opensearch_aggregate_index, settings.opensearch_failure_index, settings.opensearch_smtp_tls_index];
+  const groups = new Map();
+  for (const shard of unassigned) {
+    const index = String(shard.index || 'unknown');
+    const category = reportPatterns.some(pattern => matchesIndexPattern(index, pattern))
+      ? 'MailPosture report indexes'
+      : index.startsWith('security-auditlog-')
+        ? 'OpenSearch security audit logs'
+        : index.startsWith('.')
+          ? 'OpenSearch internal indexes'
+          : 'Other indexes';
+    const group = groups.get(category) || { category, indexes: new Set(), unassigned_shards: 0, primary_shards: 0, replica_shards: 0 };
+    group.indexes.add(index);
+    group.unassigned_shards += 1;
+    if (String(shard.prirep).toLowerCase() === 'p') group.primary_shards += 1; else group.replica_shards += 1;
+    groups.set(category, group);
+  }
+  return {
+    total: unassigned.length,
+    all_replicas: unassigned.length > 0 && unassigned.every(shard => String(shard.prirep).toLowerCase() === 'r'),
+    affected_report_shards: unassigned.filter(shard => reportPatterns.some(pattern => matchesIndexPattern(String(shard.index || ''), pattern))).length,
+    groups: [...groups.values()].map(group => ({ ...group, index_count: group.indexes.size, indexes: [...group.indexes].sort() }))
+  };
 }
 
 async function systemStatus() {
@@ -444,37 +538,61 @@ async function systemStatus() {
     try {
       const cluster = await osApiRequest(osConfig, '_cluster/health');
       connected = true;
-      const clusterStatus = cluster.status === 'red' ? 'critical' : cluster.status === 'yellow' ? 'warning' : 'healthy';
-      const singleNodeReplicas = clusterStatus === 'warning' && cluster.number_of_nodes === 1 && Number(cluster.unassigned_shards || 0) > 0;
+      let shardSummary = null;
+      try {
+        const shards = await osApiRequest(osConfig, '_cat/shards?format=json&h=index,shard,prirep,state,unassigned.reason,node&s=index,shard');
+        shardSummary = unassignedShardSummary(shards, settings);
+      } catch (_) {}
+      const rawClusterStatus = cluster.status || 'unknown';
+      const expectedSingleNodeReplicas = rawClusterStatus === 'yellow' && cluster.number_of_nodes === 1 && shardSummary?.all_replicas && shardSummary.affected_report_shards === 0;
+      const clusterStatus = rawClusterStatus === 'red' ? 'critical' : rawClusterStatus === 'green' || expectedSingleNodeReplicas ? 'healthy' : 'warning';
+      const breakdown = shardSummary?.groups.map(group => `${group.unassigned_shards} ${group.category.toLowerCase()} shard${group.unassigned_shards === 1 ? '' : 's'}`).join(' and ');
+      const clusterSummary = expectedSingleNodeReplicas ? 'Operational on one node' : `Cluster ${rawClusterStatus}`;
+      const clusterDetail = expectedSingleNodeReplicas
+        ? `OpenSearch reports yellow because ${shardSummary.total} replica shards cannot be placed on their primary's single node: ${breakdown}. All primary shards and MailPosture report indexes are available.`
+        : `Authenticated connection succeeded with ${cluster.number_of_nodes || 0} node${cluster.number_of_nodes === 1 ? '' : 's'} and ${cluster.unassigned_shards || 0} unassigned shards.`;
       const clusterAction = clusterStatus === 'healthy'
         ? 'No action required.'
-        : singleNodeReplicas
+        : rawClusterStatus === 'yellow' && cluster.number_of_nodes === 1
           ? 'For a single-node deployment, open Settings → ParseDMARC → OpenSearch output and set Replicas to 0 for new indexes. Existing indexes also need index.number_of_replicas set to 0 with the OpenSearch _settings API. Then run checks again. Keep replicas enabled on multi-node clusters.'
           : clusterStatus === 'warning'
             ? 'Use OpenSearch allocation explain to identify why the shards are unassigned, correct the reported storage, node, or allocation issue, then run checks again.'
             : 'Restore the unavailable primary shards before relying on report data. Review OpenSearch logs and use allocation explain to identify the affected indexes.';
-      checks.push(result('opensearch', 'OpenSearch', clusterStatus, `Cluster ${cluster.status || 'unknown'}`, `Authenticated connection succeeded with ${cluster.number_of_nodes || 0} node${cluster.number_of_nodes === 1 ? '' : 's'} and ${cluster.unassigned_shards || 0} unassigned shards.`, clusterAction, { cluster_name: cluster.cluster_name, nodes: cluster.number_of_nodes, active_primary_shards: cluster.active_primary_shards, unassigned_shards: cluster.unassigned_shards, recommended_for_single_node: singleNodeReplicas ? { setting: 'index.number_of_replicas', value: 0, note: 'Apply to existing report indexes with the OpenSearch _settings API.' } : null }));
+      checks.push(result('opensearch', 'OpenSearch', clusterStatus, clusterSummary, clusterDetail, clusterAction, { actual_cluster_status: rawClusterStatus, cluster_name: cluster.cluster_name, nodes: cluster.number_of_nodes, active_primary_shards: cluster.active_primary_shards, unassigned_shards: cluster.unassigned_shards, affected_report_shards: shardSummary?.affected_report_shards ?? null, unassigned_breakdown: shardSummary?.groups || [], expected_single_node_replicas: expectedSingleNodeReplicas }));
     } catch (error) {
       checks.push(result('opensearch', 'OpenSearch', 'critical', 'Connection failed', error.message, 'Verify the URL, credentials, network, TLS settings, and OpenSearch container health.'));
     }
     if (connected) {
       const patterns = [
-        ['DMARC aggregate', settings.opensearch_aggregate_index],
-        ['DMARC failure', settings.opensearch_failure_index],
-        ['SMTP TLS', settings.opensearch_smtp_tls_index]
+        ['aggregate', 'DMARC aggregate reports', settings.opensearch_aggregate_index],
+        ['failure', 'Individual DMARC failure reports (RUF)', settings.opensearch_failure_index],
+        ['smtp_tls', 'SMTP TLS reports', settings.opensearch_smtp_tls_index]
       ];
-      const probes = await Promise.all(patterns.map(async ([label, index]) => {
-        try { const data = await osApiRequest(osConfig, `${index}/_count?ignore_unavailable=true&allow_no_indices=true`); return { label, index, count: data.count || 0, available: data._shards?.total > 0 }; }
-        catch (error) { return { label, index, count: 0, available: false, error: error.message }; }
+      const probes = await Promise.all(patterns.map(async ([type, label, pattern]) => {
+        try {
+          const [data, indexRows] = await Promise.all([
+            osApiRequest(osConfig, `${pattern}/_count?ignore_unavailable=true&allow_no_indices=true`),
+            osApiRequest(osConfig, `_cat/indices/${pattern}?format=json&h=health,index,pri,rep,docs.count,store.size&s=index&expand_wildcards=all`)
+          ]);
+          const indexes = (indexRows || []).map(row => ({ name: row.index, health: row.health, primary_shards: Number(row.pri || 0), replicas: Number(row.rep || 0), documents: Number(row['docs.count'] || 0), storage: row['store.size'] || null }));
+          return { type, label, pattern, count: data.count || 0, available: indexes.length > 0, indexes };
+        } catch (error) { return { type, label, pattern, count: 0, available: false, indexes: [], error: error.message }; }
       }));
       const unavailable = probes.filter(probe => !probe.available);
-      const missingFailureOnly = unavailable.length > 0 && unavailable.every(probe => probe.label === 'DMARC failure');
+      const requiredUnavailable = unavailable.filter(probe => probe.type !== 'failure');
+      const missingFailureOnly = unavailable.length > 0 && requiredUnavailable.length === 0;
+      const rufDomains = snapshot.domains.map(domain => {
+        const dmarcCheck = domain.checks.find(check => check.id === 'dmarc');
+        return { domain: domain.domain, destination: dmarcCheck?.evidence?.tags?.ruf || null };
+      });
       const indexAction = !unavailable.length
         ? 'No action required.'
         : missingFailureOnly
-          ? 'DMARC failure (RUF/forensic) reports are optional and many providers do not send them. If you expect them, open Settings → ParseDMARC, enable Save DMARC failure reports, and confirm the domain DMARC record has a ruf= destination delivered to this mailbox. Otherwise, no change is required; the index appears after the first RUF report.'
-          : `Open Settings → ParseDMARC and enable the missing report type${unavailable.length === 1 ? '' : 's'} (${unavailable.map(probe => probe.label).join(', ')}). Confirm matching reports reach the configured mailbox, then run checks after parsedmarc processes the first report.`;
-      checks.push(result('report_indices', 'Report indexes', unavailable.length ? 'warning' : 'healthy', unavailable.length ? `${unavailable.length} index pattern${unavailable.length === 1 ? '' : 's'} unavailable` : 'Report indexes queryable', probes.map(probe => `${probe.label}: ${probe.available ? `${probe.count} documents` : 'not found'}`).join(' · '), indexAction, { indexes: probes, optional_report_note: missingFailureOnly ? 'RUF/forensic reporting is optional and is separate from failed-message counts in aggregate reports.' : null }));
+          ? 'No action is required. No individual RUF report has been stored yet. If you want this optional detail, confirm the domain publishes a ruf= destination, the destination reaches the report mailbox, and the receiving provider supports RUF.'
+          : `Open Settings → ParseDMARC and enable the missing required report type${requiredUnavailable.length === 1 ? '' : 's'} (${requiredUnavailable.map(probe => probe.label).join(', ')}). Confirm matching reports reach the configured mailbox, then run checks after parsedmarc processes the first report.${unavailable.some(probe => probe.type === 'failure') ? ' The missing individual RUF index is optional and does not require correction.' : ''}`;
+      const reportStatus = requiredUnavailable.length ? 'warning' : missingFailureOnly ? 'info' : 'healthy';
+      const reportSummary = requiredUnavailable.length ? `${requiredUnavailable.length} required index pattern${requiredUnavailable.length === 1 ? '' : 's'} unavailable` : missingFailureOnly ? 'Optional RUF data not received' : 'Report indexes queryable';
+      checks.push(result('report_indices', 'Report indexes — All domains', reportStatus, reportSummary, 'All configured index patterns were checked across all domains. Open the pattern list below for matching indexes and document counts.', indexAction, { scope: 'All domains', patterns: probes, ruf_domains: rufDomains, failure_reports_optional: true }));
     }
   }
 
@@ -651,14 +769,37 @@ async function reports(domain, config, days) {
   try {
     const sourceField = await sourceAggregationField(config);
     const failedAggregations = { total: { sum: { field: 'message_count' } } };
-    if (sourceField) failedAggregations.sources = { terms: { field: sourceField, size: 5 }, aggs: { messages: { sum: { field: 'message_count' } } } };
+    if (sourceField) failedAggregations.sources = { terms: { field: sourceField, size: 5 }, aggs: { messages: { sum: { field: 'message_count' } }, identity: { top_hits: { size: 1, _source: ['source_reverse_dns', 'source_name', 'source_base_domain', 'source_as_name', 'source_as_domain', 'source_as_description'] } } } };
     const data = await osRequest(config, '_search', 'POST', { size: 0, query: { bool: { must: [{ range: { date_begin: { gte: `now-${days}d` } } }, { match_phrase: { header_from: domain } }] } }, aggs: { total: { sum: { field: 'message_count' } }, passed: { filter: { term: { passed_dmarc: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, dkim_passed: { filter: { term: { passed_dkim: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, spf_passed: { filter: { term: { passed_spf: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: failedAggregations }, timeline: { date_histogram: { field: 'date_begin', calendar_interval: 'day', min_doc_count: 0 }, aggs: { total: { sum: { field: 'message_count' } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: { total: { sum: { field: 'message_count' } } } } } } } });
-    const total = data.aggregations?.total?.value || 0; const passed = data.aggregations?.passed?.total?.value || 0; const failed = data.aggregations?.failed?.total?.value || 0; const rate = total ? Math.round(passed / total * 1000) / 10 : null; const sources = (data.aggregations?.failed?.sources?.buckets || []).map(v => ({ ip: v.key, messages: v.messages?.value || v.doc_count })); const status = !total ? 'warning' : rate < 90 ? 'critical' : rate < 98 ? 'warning' : 'healthy';
+    const total = data.aggregations?.total?.value || 0; const passed = data.aggregations?.passed?.total?.value || 0; const failed = data.aggregations?.failed?.total?.value || 0; const rate = total ? Math.round(passed / total * 1000) / 10 : null;
+    const sources = await Promise.all((data.aggregations?.failed?.sources?.buckets || []).map(async bucket => {
+      const identity = bucket.identity?.hits?.hits?.[0]?._source || {};
+      const savedReverse = Array.isArray(identity.source_reverse_dns) ? identity.source_reverse_dns[0] : identity.source_reverse_dns;
+      let fqdn = savedReverse || identity.source_name || identity.source_base_domain || null;
+      if (!fqdn) fqdn = await reverseDnsName(bucket.key);
+      return { ip: bucket.key, fqdn, base_domain: identity.source_base_domain || null, network_owner: identity.source_as_name || identity.source_as_description || identity.source_as_domain || null, messages: bucket.messages?.value || bucket.doc_count };
+    }));
+    const status = !total ? 'warning' : rate < 90 ? 'critical' : rate < 98 ? 'warning' : 'healthy';
     const mappingNote = sourceField ? '' : ' Source-IP ranking is unavailable because the field is not aggregatable in these indices.';
     const timeline = (data.aggregations?.timeline?.buckets || []).map(bucket => ({ date: bucket.key_as_string, total: Math.round(bucket.total?.value || 0), failed: Math.round(bucket.failed?.total?.value || 0) }));
     const dkimPassed = data.aggregations?.dkim_passed?.total?.value || 0; const spfPassed = data.aggregations?.spf_passed?.total?.value || 0;
     return result('dmarc_reports', 'DMARC reports', status, total ? `${rate}% aligned` : 'No recent reports', (total ? `${Math.round(failed)} of ${Math.round(total)} messages failed in ${days} days.` : 'No matching aggregate reports were found.') + mappingNote, total && status !== 'healthy' ? (sourceField ? 'Review top failing sources and align legitimate senders.' : 'Review failing records in parsedmarc and align legitimate senders.') : 'Watch for new failing sources.', { period_days: days, total: Math.round(total), passed: Math.round(passed), failed: Math.round(failed), pass_rate: rate, dkim_pass_rate: total ? Math.round(dkimPassed / total * 1000) / 10 : null, spf_pass_rate: total ? Math.round(spfPassed / total * 1000) / 10 : null, source_field: sourceField, top_failing_sources: sources, timeline });
   } catch (error) { return result('dmarc_reports', 'DMARC reports', 'warning', 'OpenSearch query failed', error.message, 'Verify the OpenSearch environment variables and parsedmarc index.'); }
+}
+
+async function reverseDnsName(address) {
+  let timeout;
+  try {
+    const names = await Promise.race([
+      dns.reverse(address),
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Reverse DNS timed out')), Math.min(requestTimeoutMs, 3000)); })
+    ]);
+    return names[0] || null;
+  } catch (_) {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function failureReports(domain, config, days) {
@@ -669,27 +810,36 @@ async function failureReports(domain, config, days) {
   } catch (error) { return { available: false, count: 0, error: error.message, period_days: days }; }
 }
 
+function smtpOrganization(source, fields = {}) {
+  const fieldValue = Array.isArray(fields.organization_name) ? fields.organization_name[0] : fields.organization_name;
+  const value = source.organization_name || source.organization || source.org_name || source.report_metadata?.organization_name || source.report_metadata?.org_name || source.report?.organization_name || fieldValue;
+  return String(value || '').trim() || 'Reporter name not provided';
+}
+
 function summarizeSmtpHits(hits, domain, days) {
-  const timeline = new Map(); const failures = new Map(); const organizations = new Map(); let successful = 0; let failed = 0; let reports = 0;
+  const timeline = new Map(); const failures = new Map(); const organizations = new Map(); const rawSamples = []; let successful = 0; let failed = 0; let reports = 0;
   for (const hit of hits || []) {
     const source = hit._source || hit; const date = String(source.date_begin || source.begin_date || '').slice(0, 10);
-    for (const policy of source.policies || []) {
-      if (String(policy.policy_domain || '').toLowerCase() !== domain.toLowerCase()) continue;
+    const organization = smtpOrganization(source, hit.fields || {});
+    const matchingPolicies = (source.policies || []).filter(policy => String(policy.policy_domain || '').toLowerCase() === domain.toLowerCase());
+    if (!matchingPolicies.length) continue;
+    if (rawSamples.length < 10) rawSamples.push({ index: hit._index || null, organization_name: source.organization_name ?? null, organization: source.organization ?? null, org_name: source.org_name ?? source.report_metadata?.organization_name ?? source.report_metadata?.org_name ?? null, contact_info: source.contact_info ?? null, report_id: source.report_id ?? null, date_begin: source.date_begin ?? source.begin_date ?? null, date_end: source.date_end ?? source.end_date ?? null, source_fields: Object.keys(source).sort() });
+    for (const policy of matchingPolicies) {
       reports += 1; const pass = Number(policy.successful_session_count || policy.summary?.total_successful_session_count || 0); const fail = Number(policy.failed_session_count || policy.summary?.total_failure_session_count || 0);
       successful += pass; failed += fail;
       if (date) { const day = timeline.get(date) || { date, successful: 0, failed: 0 }; day.successful += pass; day.failed += fail; timeline.set(date, day); }
-      const organization = source.organization_name || 'Unknown reporter'; organizations.set(organization, (organizations.get(organization) || 0) + pass + fail);
+      organizations.set(organization, (organizations.get(organization) || 0) + pass + fail);
       for (const detail of policy.failure_details || []) { const type = detail.result_type || 'unspecified'; failures.set(type, (failures.get(type) || 0) + Number(detail.failed_session_count || 0)); }
     }
   }
   const total = successful + failed;
-  return { available: true, period_days: days, reports, successful, failed, success_rate: total ? Math.round(successful / total * 1000) / 10 : null, timeline: [...timeline.values()].sort((a, b) => a.date.localeCompare(b.date)), failure_types: [...failures].map(([type, count]) => ({ type, count })).sort((a, b) => b.count - a.count).slice(0, 8), organizations: [...organizations].map(([name, sessions]) => ({ name, sessions })).sort((a, b) => b.sessions - a.sessions).slice(0, 8) };
+  return { available: true, period_days: days, reports, successful, failed, success_rate: total ? Math.round(successful / total * 1000) / 10 : null, timeline: [...timeline.values()].sort((a, b) => a.date.localeCompare(b.date)), failure_types: [...failures].map(([type, count]) => ({ type, count })).sort((a, b) => b.count - a.count).slice(0, 8), organizations: [...organizations].map(([name, sessions]) => ({ name, sessions })).sort((a, b) => b.sessions - a.sessions).slice(0, 8), raw_samples: rawSamples };
 }
 
 async function smtpTlsReports(domain, config, days) {
   if (!config.enabled) return { available: false, reports: 0, reason: 'OpenSearch disabled' };
   try {
-    const data = await osRequest(config, '_search', 'POST', { size: 500, _source: ['organization_name', 'date_begin', 'begin_date', 'policies'], query: { range: { date_begin: { gte: `now-${days}d` } } }, sort: [{ date_begin: 'desc' }] }, config.smtp_tls_index);
+    const data = await osRequest(config, '_search', 'POST', { size: 500, query: { bool: { must: [{ range: { date_begin: { gte: `now-${days}d` } } }, { match_phrase: { 'policies.policy_domain': domain } }] } }, sort: [{ date_begin: 'desc' }] }, config.smtp_tls_index);
     return summarizeSmtpHits(data.hits?.hits || [], domain, days);
   } catch (error) { return { available: false, reports: 0, error: error.message, period_days: days }; }
 }
@@ -700,7 +850,7 @@ async function checkDomain(entry, config) {
   if (!certs.length) certs.push(result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
   return summarize(entry.domain, [dm, aggregate, keys, sts, tlsreport, ...certs, brand], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls });
 }
-function demo() { const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',messages:620},{ip:'198.51.100.8',messages:381}] }; const aggregateCheck = result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,249 messages failed in 7 days.','Review the top failing sources.',aggregate); return summarize('example.com', [result('dmarc','DMARC','warning','Quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','Reports enabled','SMTP TLS failures have a report destination.','Review TLS reports.'), result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465,days_remaining:64}), result('bimi','BIMI','warning','Self-asserted logo','No mark certificate is published.','Consider a VMC or CMC.')], { aggregate, failure:{available:true,count:2,period_days:7}, smtp_tls:{available:true,reports:4,successful:8200,failed:14,success_rate:99.8,timeline:[{date:'2026-08-30',successful:1800,failed:6},{date:'2026-09-01',successful:3200,failed:5},{date:'2026-09-02',successful:3200,failed:3}],failure_types:[{type:'validation-failure',count:9},{type:'starttls-not-supported',count:5}],organizations:[{name:'Example Reporter',sessions:8214}] } }); }
+function demo() { const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',fqdn:'outbound.example.net',network_owner:'Example Mail',messages:620},{ip:'198.51.100.8',fqdn:'relay.example.org',messages:381}] }; const aggregateCheck = result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,249 messages failed in 7 days.','Review the top failing sources.',aggregate); return summarize('example.com', [result('dmarc','DMARC','warning','Quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','Reports enabled','SMTP TLS failures have a report destination.','Review TLS reports.'), result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465,days_remaining:64}), result('bimi','BIMI','warning','Self-asserted logo','No mark certificate is published.','Consider a VMC or CMC.')], { aggregate, failure:{available:false,count:0,period_days:7}, smtp_tls:{available:true,reports:4,successful:8200,failed:14,success_rate:99.8,timeline:[{date:'2026-08-30',successful:1800,failed:6},{date:'2026-09-01',successful:3200,failed:5},{date:'2026-09-02',successful:3200,failed:3}],failure_types:[{type:'validation-failure',count:9},{type:'starttls-not-supported',count:5}],organizations:[{name:'Example Reporter',sessions:8214}],raw_samples:[{index:'smtp_tls-2026.09',organization_name:'Example Reporter',contact_info:'tls@example.net',report_id:'demo-report',date_begin:'2026-09-01T00:00:00Z',source_fields:['contact_info','date_begin','organization_name','policies','report_id']}] } }); }
 
 async function refresh() {
   if (activeRefresh) return activeRefresh; snapshot.refreshing = true;
@@ -732,6 +882,11 @@ const server = http.createServer(async (req,res) => {
   if (pathname === '/api/status' && req.method === 'GET') return json(res,200,snapshot);
   if (pathname === '/api/system-status' && req.method === 'GET') { try { return json(res, 200, await systemStatus()); } catch (error) { return json(res, 500, { version: APP_VERSION, checked_at: new Date().toISOString(), status: 'critical', checks: [], error: error.message }); } }
   if (pathname === '/api/system-logs' && req.method === 'GET') return json(res, 200, diagnosticLog());
+  if (pathname === '/api/service-logs' && req.method === 'GET') {
+    const service = requestUrl.searchParams.get('service') || 'mailposture';
+    if (!Object.hasOwn(SERVICE_LOG_PATHS, service)) return json(res, 400, { error: 'Choose MailPosture, OpenSearch, or ParseDMARC.' });
+    return json(res, 200, await serviceLog(service));
+  }
   if (pathname === '/api/bimi-logo' && req.method === 'GET') return serveBimiLogo(res, requestUrl);
   if (pathname === '/api/refresh' && req.method === 'POST') return json(res,202,await refresh());
   if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, publicSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }
@@ -740,4 +895,4 @@ const server = http.createServer(async (req,res) => {
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); addDiagnosticEvent('mailposture', 'info', 'MailPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, validCron, summarize, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, refresh, getSnapshot:()=>snapshot };

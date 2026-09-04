@@ -1,7 +1,7 @@
 'use strict';
 
 const $ = selector => document.querySelector(selector);
-const state = { data: null, system: null, logs: [], selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/' };
+const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/' };
 const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info' };
 const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
@@ -50,12 +50,18 @@ function rankedList(items, nameKey, valueKey, emptyText) {
   return `<ol class="ranked-list">${items.map(item => `<li><span>${esc(item[nameKey])}</span><strong>${number(item[valueKey])}</strong><span class="rank-bar"><i style="width:${Number(item[valueKey] || 0) / maximum * 100}%"></i></span></li>`).join('')}</ol>`;
 }
 
+function sourceList(items) {
+  if (!items?.length) return '<p class="report-empty">No failing sources were reported.</p>';
+  const maximum = Math.max(1, ...items.map(item => Number(item.messages || 0)));
+  return `<ol class="ranked-list source-list">${items.map(item => `<li><span class="source-identity"><strong>${esc(item.ip)}</strong>${item.fqdn ? `<small>${esc(item.fqdn)}</small>` : '<small>No reverse-DNS name found</small>'}${item.network_owner ? `<small>${esc(item.network_owner)}</small>` : ''}</span><strong>${number(item.messages)}</strong><span class="rank-bar"><i style="width:${Number(item.messages || 0) / maximum * 100}%"></i></span></li>`).join('')}</ol>`;
+}
+
 function reportId(id) { return id ? ` id="${esc(id)}" tabindex="-1"` : ''; }
 
 function aggregateCard(report, wide = false, id = '') {
   if (!report?.total) return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>Authentication results reported by receiving email services.</p></div></div><p class="report-empty">No aggregate report data was found for this period.</p></article>`;
   const passed = Math.max(0, Number(report.total) - Number(report.failed || 0));
-  return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>${number(report.total)} messages observed over ${number(report.period_days)} days</p></div><span class="report-value">${report.pass_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.failed)}</strong><span>Messages failing DMARC</span></div><div class="metric"><strong>${report.dkim_pass_rate ?? '—'}%</strong><span>DKIM aligned</span></div><div class="metric"><strong>${report.spf_pass_rate ?? '—'}%</strong><span>SPF aligned</span></div></div><p class="report-explanation">This is the number of messages that failed DMARC in aggregate reports. It is separate from optional RUF/forensic report files.</p>${trendChart((report.timeline || []).map(item => ({...item, passed: Math.max(0, item.total - item.failed)})), 'passed', 'failed', `Stacked DMARC daily results: ${number(passed)} successful and ${number(report.failed)} failed`)}</article>`;
+  return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>${number(report.total)} messages observed over ${number(report.period_days)} days</p></div><span class="report-value">${report.pass_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.failed)}</strong><span>Messages failing DMARC</span></div><div class="metric"><strong>${report.dkim_pass_rate ?? '—'}%</strong><span>DKIM aligned</span></div><div class="metric"><strong>${report.spf_pass_rate ?? '—'}%</strong><span>SPF aligned</span></div></div><p class="report-explanation">This is the number of messages that failed DMARC in aggregate reports. It is separate from optional, message-level RUF report files.</p>${trendChart((report.timeline || []).map(item => ({...item, passed: Math.max(0, item.total - item.failed)})), 'passed', 'failed', `Stacked DMARC daily results: ${number(passed)} successful and ${number(report.failed)} failed`)}</article>`;
 }
 
 function smtpTlsCard(report, id = '') {
@@ -65,35 +71,38 @@ function smtpTlsCard(report, id = '') {
 
 function failureCard(report, id = '') {
   const explanation = report?.available
-    ? `${number(report.count)} optional RUF/forensic report file${Number(report.count) === 1 ? '' : 's'} received. A zero here does not mean that no messages failed DMARC; those failures are counted in aggregate reports.`
-    : 'No RUF/forensic index is available. These reports are optional, and many receiving services do not send them.';
-  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>DMARC failure (RUF) reports</h3><p>Optional individual or forensic reports, separate from aggregate failed-message counts</p></div><span class="report-value">${report?.available ? number(report.count) : '—'}</span></div><p class="report-explanation">${esc(explanation)}</p><p class="privacy-note">${esc(report?.privacy_note || report?.error || 'Message samples are not displayed because they may contain personal or confidential content.')}</p></article>`;
+    ? `${number(report.count)} optional individual report file${Number(report.count) === 1 ? '' : 's'} received. This is a file count, not the number of messages that failed DMARC.`
+    : 'No individual-report index has been created. This usually means no provider has sent an optional RUF report; it is not evidence that report processing failed.';
+  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>Individual DMARC failure reports (RUF)</h3><p>Optional, message-level reports sent by some receiving providers</p></div><span class="report-value">${report?.available ? number(report.count) : '0'}</span></div><p class="report-explanation">${esc(explanation)} Aggregate reports above remain the authoritative count of messages that failed DMARC.</p><p class="privacy-note">${esc(report?.privacy_note || (report?.error ? 'No matching index is available yet.' : '') || 'Message samples are not displayed because they may contain personal or confidential content.')}</p></article>`;
 }
 
 function reportingOrganizationsCard(report, id = '') {
   const organizations = report?.organizations || [];
-  const raw = organizations.length ? `<details class="raw-data"><summary>Show raw organization data</summary><pre>${esc(JSON.stringify(organizations, null, 2))}</pre></details>` : '';
-  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>TLS reporting organizations</h3><p>Mail providers that sent TLS-RPT data about delivery attempts to your domain</p></div></div><p class="report-explanation">Each value is the number of reported SMTP delivery sessions, not messages. Use this list to see which outside providers are reporting and to identify whether a TLS problem is concentrated at one sender.</p>${rankedList(organizations, 'name', 'sessions', 'No TLS reporting organizations were found.')}${raw}</article>`;
+  const samples = report?.raw_samples || [];
+  const raw = samples.length || organizations.length ? `<details class="raw-data"><summary>Show reporter source fields</summary><p>These limited samples show the exact organization-related fields stored by parsedmarc. Message content and policy details are excluded.</p><pre>${esc(JSON.stringify({ normalized_organizations: organizations, source_samples: samples }, null, 2))}</pre></details>` : '';
+  const missingName = organizations.some(item => item.name === 'Reporter name not provided');
+  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>TLS reporting organizations</h3><p>Mail providers that sent TLS-RPT data about delivery attempts to your domain</p></div></div><p class="report-explanation">Each value is the number of reported SMTP delivery sessions, not messages. ${missingName ? '“Reporter name not provided” means the stored report did not contain a recognized organization-name field; open the source fields below to verify what parsedmarc saved.' : 'The source fields below let you verify the names parsedmarc stored.'}</p>${rankedList(organizations, 'name', 'sessions', 'No TLS reporting organizations were found.')}${raw}</article>`;
 }
 
 function detailCards(reports) {
-  return `${aggregateCard(reports?.aggregate, true, 'report-dmarc')} ${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls')} ${failureCard(reports?.failure, 'report-dmarc-failure')}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages</p></div></div>${rankedList(reports?.aggregate?.top_failing_sources, 'ip', 'messages', 'No failing sources were reported.')}</article><article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}`;
+  return `${aggregateCard(reports?.aggregate, true, 'report-dmarc')} ${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls')} ${failureCard(reports?.failure, 'report-dmarc-failure')}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages, with reverse-DNS names when available</p></div></div>${sourceList(reports?.aggregate?.top_failing_sources)}</article><article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}`;
 }
 
 function organizationReports(domains) {
-  const aggregate = { total: 0, failed: 0, period_days: 0, timeline: [], top_failing_sources: [] }; const smtp = { available: false, reports: 0, successful: 0, failed: 0, timeline: [], failure_types: [], organizations: [] }; let failures = 0; let failureAvailable = false;
+  const aggregate = { total: 0, failed: 0, period_days: 0, timeline: [], top_failing_sources: [] }; const smtp = { available: false, reports: 0, successful: 0, failed: 0, timeline: [], failure_types: [], organizations: [], raw_samples: [] }; let failures = 0; let failureAvailable = false;
   const days = new Map(); const tlsDays = new Map(); const sources = new Map(); const types = new Map(); const organizations = new Map(); let dkimWeighted = 0; let spfWeighted = 0;
   for (const domain of domains) {
     const a = domain.reports?.aggregate || {}; aggregate.total += Number(a.total || 0); aggregate.failed += Number(a.failed || 0); aggregate.period_days = Math.max(aggregate.period_days, Number(a.period_days || 0)); dkimWeighted += Number(a.dkim_pass_rate || 0) * Number(a.total || 0); spfWeighted += Number(a.spf_pass_rate || 0) * Number(a.total || 0);
     for (const point of a.timeline || []) { const key = String(point.date).slice(0,10); const day = days.get(key) || {date:key,total:0,failed:0}; day.total += Number(point.total || 0); day.failed += Number(point.failed || 0); days.set(key,day); }
-    for (const item of a.top_failing_sources || []) sources.set(item.ip, (sources.get(item.ip) || 0) + Number(item.messages || 0));
+    for (const item of a.top_failing_sources || []) { const current = sources.get(item.ip) || { ...item, messages: 0 }; current.messages += Number(item.messages || 0); if (!current.fqdn && item.fqdn) current.fqdn = item.fqdn; if (!current.network_owner && item.network_owner) current.network_owner = item.network_owner; sources.set(item.ip, current); }
     const t = domain.reports?.smtp_tls || {}; if (t.available) smtp.available = true; smtp.reports += Number(t.reports || 0); smtp.successful += Number(t.successful || 0); smtp.failed += Number(t.failed || 0);
     for (const point of t.timeline || []) { const key = String(point.date).slice(0,10); const day = tlsDays.get(key) || {date:key,successful:0,failed:0}; day.successful += Number(point.successful || 0); day.failed += Number(point.failed || 0); tlsDays.set(key,day); }
     for (const item of t.failure_types || []) types.set(item.type, (types.get(item.type) || 0) + Number(item.count || 0));
     for (const item of t.organizations || []) organizations.set(item.name, (organizations.get(item.name) || 0) + Number(item.sessions || 0));
+    for (const sample of t.raw_samples || []) if (smtp.raw_samples.length < 20) smtp.raw_samples.push({ domain: domain.domain, ...sample });
     const f = domain.reports?.failure || {}; if (f.available) failureAvailable = true; failures += Number(f.count || 0);
   }
-  aggregate.pass_rate = aggregate.total ? Math.round((aggregate.total - aggregate.failed) / aggregate.total * 1000) / 10 : null; aggregate.dkim_pass_rate = aggregate.total ? Math.round(dkimWeighted / aggregate.total * 10) / 10 : null; aggregate.spf_pass_rate = aggregate.total ? Math.round(spfWeighted / aggregate.total * 10) / 10 : null; aggregate.timeline = [...days.values()].sort((a,b)=>a.date.localeCompare(b.date)); aggregate.top_failing_sources = [...sources].map(([ip,messages])=>({ip,messages})).sort((a,b)=>b.messages-a.messages).slice(0,8);
+  aggregate.pass_rate = aggregate.total ? Math.round((aggregate.total - aggregate.failed) / aggregate.total * 1000) / 10 : null; aggregate.dkim_pass_rate = aggregate.total ? Math.round(dkimWeighted / aggregate.total * 10) / 10 : null; aggregate.spf_pass_rate = aggregate.total ? Math.round(spfWeighted / aggregate.total * 10) / 10 : null; aggregate.timeline = [...days.values()].sort((a,b)=>a.date.localeCompare(b.date)); aggregate.top_failing_sources = [...sources.values()].sort((a,b)=>b.messages-a.messages).slice(0,8);
   const tlsTotal = smtp.successful + smtp.failed; smtp.success_rate = tlsTotal ? Math.round(smtp.successful / tlsTotal * 1000) / 10 : null; smtp.timeline = [...tlsDays.values()].sort((a,b)=>a.date.localeCompare(b.date)); smtp.failure_types = [...types].map(([type,count])=>({type,count})).sort((a,b)=>b.count-a.count).slice(0,8); smtp.organizations = [...organizations].map(([name,sessions])=>({name,sessions})).sort((a,b)=>b.sessions-a.sessions).slice(0,8);
   return { aggregate, smtp_tls: smtp, failure: { available: failureAvailable, count: failures, privacy_note: 'Counts only. Message samples remain private.' } };
 }
@@ -189,9 +198,27 @@ function renderStatus() {
 }
 
 function systemSettingsSection(check) {
-  if (check.id === 'opensearch') return check.evidence?.recommended_for_single_node ? 'parsedmarc' : 'opensearch';
+  if (check.id === 'opensearch') return check.evidence?.nodes === 1 && check.evidence?.actual_cluster_status === 'yellow' ? 'parsedmarc' : 'opensearch';
   if (check.id === 'report_indices' || check.id.startsWith('parsedmarc')) return 'parsedmarc';
   return null;
+}
+
+function systemCheckDetails(check) {
+  if (check.id === 'opensearch' && check.evidence?.unassigned_breakdown?.length) {
+    return `<div class="system-breakdown"><strong>Unassigned shard breakdown</strong><ul>${check.evidence.unassigned_breakdown.map(group => `<li><span>${esc(group.category)}</span><b>${number(group.unassigned_shards)} shard${Number(group.unassigned_shards) === 1 ? '' : 's'} across ${number(group.index_count)} index${Number(group.index_count) === 1 ? '' : 'es'} · ${number(group.primary_shards)} primary, ${number(group.replica_shards)} replica</b></li>`).join('')}</ul>${check.evidence.affected_report_shards === 0 ? '<p>No MailPosture report shard is affected.</p>' : `<p>${number(check.evidence.affected_report_shards)} report shard${Number(check.evidence.affected_report_shards) === 1 ? ' is' : 's are'} affected.</p>`}</div>`;
+  }
+  if (check.id === 'report_indices' && check.evidence?.patterns) {
+    const patterns = check.evidence.patterns.map(item => {
+      const summary = item.available ? `${number(item.count)} documents` : item.type === 'failure' ? 'No optional reports received' : 'Unavailable';
+      const contents = item.indexes?.length
+        ? `<div class="index-rows">${item.indexes.map(index => `<div><code>${esc(index.name)}</code><span>${esc(index.health || 'unknown')} · ${number(index.documents)} documents · ${number(index.primary_shards)} primary · ${number(index.replicas)} replica</span></div>`).join('')}</div>`
+        : `<p>${item.type === 'failure' ? 'OpenSearch has no matching index. This is normal until a provider sends the first optional RUF report.' : esc(item.error || 'No matching index has been created yet.')}</p>`;
+      return `<details class="index-pattern"><summary><span><b>${esc(item.label)}</b><code>${esc(item.pattern)}</code></span><em>${summary}</em></summary>${contents}</details>`;
+    }).join('');
+    const rufDomains = check.evidence.ruf_domains?.length ? `<details class="ruf-domains"><summary>Domains publishing a RUF destination</summary><div>${check.evidence.ruf_domains.map(item => `<p><strong>${esc(item.domain)}</strong><span>${item.destination ? esc(item.destination) : 'No ruf tag published'}</span></p>`).join('')}</div></details>` : '';
+    return `<div class="index-patterns"><strong>Scope: ${esc(check.evidence.scope || 'All domains')}</strong>${patterns}${rufDomains}</div>`;
+  }
+  return '';
 }
 
 function renderSystemStatus() {
@@ -209,11 +236,12 @@ function renderSystemStatus() {
   }
   const status = data.status || 'warning';
   const counts = (data.checks || []).reduce((totals, check) => ({ ...totals, [check.status]: (totals[check.status] || 0) + 1 }), {});
-  $('#system-status-summary').innerHTML = `${statusSymbol(status)}<div><strong>${names[status] || 'Unavailable'}</strong><span>${counts.critical || 0} need action · ${counts.warning || 0} review · ${counts.healthy || 0} healthy</span></div>`;
+  $('#system-status-summary').innerHTML = `${statusSymbol(status)}<div><strong>${names[status] || 'Unavailable'}</strong><span>${counts.critical || 0} need action · ${counts.warning || 0} review · ${counts.info || 0} informational · ${counts.healthy || 0} healthy</span></div>`;
   $('#system-status-checks').innerHTML = (data.checks || []).map(check => {
     const section = systemSettingsSection(check);
+    const structuredDetails = systemCheckDetails(check);
     const technicalDetails = Object.keys(check.evidence || {}).length ? `<details class="system-evidence"><summary>Show technical details</summary><pre>${esc(JSON.stringify(check.evidence, null, 2))}</pre></details>` : '';
-    return `<article class="system-status-card ${esc(check.status)}"><div class="system-status-card-heading">${statusSymbol(check.status)}<div><span class="state ${esc(check.status)}">${esc(names[check.status] || check.status)}</span><h3>${esc(check.label)}</h3></div></div><strong>${esc(check.summary)}</strong><p>${esc(check.detail)}</p>${check.status !== 'healthy' ? `<div class="system-action"><span>Next action</span><p>${esc(check.action)}</p>${section ? `<button type="button" data-system-settings="${section}">Open Settings →</button>` : ''}</div>` : ''}${technicalDetails}</article>`;
+    return `<article class="system-status-card ${esc(check.status)}"><div class="system-status-card-heading">${statusSymbol(check.status)}<div><span class="state ${esc(check.status)}">${esc(names[check.status] || check.status)}</span><h3>${esc(check.label)}</h3></div></div>${check.evidence?.scope ? `<span class="system-scope">${esc(check.evidence.scope)}</span>` : ''}<strong>${esc(check.summary)}</strong><p>${esc(check.detail)}</p>${structuredDetails}${check.status !== 'healthy' ? `<div class="system-action"><span>${check.status === 'info' ? 'Guidance' : 'Next action'}</span><p>${esc(check.action)}</p>${section && check.status !== 'info' ? `<button type="button" data-system-settings="${section}">Open Settings →</button>` : ''}</div>` : ''}${technicalDetails}</article>`;
   }).join('') || '<div class="clear">No system checks were returned.</div>';
 }
 
@@ -237,6 +265,32 @@ async function loadSystemLogs() {
   renderSystemLogs();
 }
 
+function renderServiceLogs() {
+  const container = $('#service-log');
+  if (!container) return;
+  const data = state.serviceLogs;
+  if (!data) return;
+  if (!data.available) {
+    container.innerHTML = `<div class="clear">${esc(data.reason || 'No service log is available.')}</div>`;
+    return;
+  }
+  container.innerHTML = (data.files || []).map(file => `<article class="service-log-file"><div><strong>${esc(file.name)}</strong><span>${file.updated_at ? `Updated ${esc(new Date(file.updated_at).toLocaleString())}` : ''}</span></div><pre>${esc(file.content || 'The log file is empty.')}</pre></article>`).join('');
+}
+
+async function loadServiceLogs() {
+  const service = $('#service-log-service')?.value || 'mailposture';
+  const container = $('#service-log');
+  if (container) container.innerHTML = '<div class="clear">Loading service log…</div>';
+  try {
+    const response = await fetch(`/api/service-logs?service=${encodeURIComponent(service)}`, { cache: 'no-store' });
+    state.serviceLogs = await response.json();
+    if (!response.ok) throw new Error(state.serviceLogs.error || 'Unable to load the service log');
+  } catch (error) {
+    state.serviceLogs = { service, available: false, reason: error.message };
+  }
+  renderServiceLogs();
+}
+
 async function loadSystemStatus() {
   try {
     const response = await fetch('/api/system-status', { cache: 'no-store' });
@@ -247,6 +301,7 @@ async function loadSystemStatus() {
   }
   renderSystemStatus();
   await loadSystemLogs();
+  await loadServiceLogs();
 }
 
 function detail(id) {
@@ -624,6 +679,8 @@ $('#mailbox-enabled').onchange = updateSettingsVisibility;
 $('#snapshots-enabled').onchange = updateSettingsVisibility;
 $('#archive-folder').oninput = updateSettingsVisibility;
 $('#log-service').onchange = renderSystemLogs;
+$('#service-log-service').onchange = loadServiceLogs;
+$('#refresh-service-log').onclick = loadServiceLogs;
 $('#pm-delete').onchange = event => {
   ['#pm-delete-aggregate', '#pm-delete-failure', '#pm-delete-smtp-tls', '#pm-delete-invalid'].forEach(selector => { $(selector).checked = event.target.checked; });
 };

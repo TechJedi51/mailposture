@@ -167,3 +167,31 @@ html[data-theme="light"] .certificate-days{opacity:.09}
 .diagnostic-section{padding-bottom:24px}.diagnostic-note{max-width:760px;margin:-8px 0 18px;color:var(--muted);font-size:12px;line-height:1.55}.log-filter{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;font-weight:700}.log-filter select{min-height:38px}.system-log{display:grid;border:1px solid var(--line);border-radius:16px;background:var(--panel);overflow:hidden}.log-entry{display:grid;grid-template-columns:150px 22px 100px minmax(0,1fr);gap:10px;align-items:start;padding:13px 16px;border-bottom:1px solid var(--line)}.log-entry:last-child{border-bottom:0}.log-entry time,.log-entry>strong{padding-top:2px;color:var(--muted);font-size:11px}.log-entry>strong{text-transform:capitalize}.log-entry h3{margin:0;font-size:13px}.log-entry p{margin:4px 0 0;color:var(--muted);font-size:11px;line-height:1.5}.system-evidence{width:100%;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
 
 @media(max-width:720px){.log-entry{grid-template-columns:22px 90px minmax(0,1fr)}.log-entry time{grid-column:1/-1}.bimi-logo{width:62px;height:62px}.certificate-days{font-size:88px}}
+
+/* v1.1 reporting scope, service logs, and source identity */
+.state.info{color:var(--blue)}
+.status-symbol.info{color:var(--blue)}
+.system-status-card.info{border-color:color-mix(in srgb,var(--blue) 34%,var(--line))}
+.system-scope{margin:-12px 0 12px;padding:4px 8px;border-radius:999px;background:var(--raised);color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.04em;text-transform:uppercase}
+.system-breakdown,.index-patterns{width:100%;margin:0 0 18px;padding:14px;border:1px solid var(--line);border-radius:12px;background:color-mix(in srgb,var(--raised) 42%,transparent)}
+.system-breakdown>strong,.index-patterns>strong{font-size:12px}
+.system-breakdown ul{display:grid;gap:8px;margin:12px 0 0;padding:0;list-style:none}
+.system-breakdown li{display:flex;justify-content:space-between;gap:14px;color:var(--muted);font-size:11px}
+.system-breakdown li b{color:var(--text);text-align:right}
+.system-breakdown p{margin:12px 0 0;color:var(--healthy);font-size:11px;font-weight:700}
+.index-pattern{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.index-pattern summary{display:flex;justify-content:space-between;align-items:center;gap:14px}
+.index-pattern summary>span{display:grid;gap:4px;min-width:0}
+.index-pattern summary code{color:var(--muted);font-size:10px;overflow-wrap:anywhere}
+.index-pattern summary em{color:var(--muted);font-size:10px;font-style:normal;text-align:right}
+.index-pattern>p{margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.5}
+.index-rows{display:grid;gap:7px;margin-top:10px}
+.index-rows>div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:8px;border-radius:8px;background:var(--panel);font-size:10px}
+.index-rows span{color:var(--muted);text-align:right}
+.ruf-domains{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+.ruf-domains>div{display:grid;gap:7px;margin-top:9px}.ruf-domains p{display:grid;grid-template-columns:minmax(120px,.5fr) 1fr;gap:10px;margin:0;font-size:10px}.ruf-domains span{color:var(--muted);overflow-wrap:anywhere}
+.source-identity{display:grid;gap:2px}.source-identity>strong{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}.source-identity small{color:var(--muted);font-size:10px}
+.raw-data>p{color:var(--muted);font-size:11px;line-height:1.5}
+.service-log-controls{display:flex;align-items:center;gap:10px}.service-log{display:grid;gap:14px}.service-log-file{min-width:0;border:1px solid var(--line);border-radius:16px;background:var(--panel);overflow:hidden}.service-log-file>div{display:flex;justify-content:space-between;gap:16px;padding:12px 15px;border-bottom:1px solid var(--line);font-size:11px}.service-log-file>div span{color:var(--muted)}.service-log-file pre{max-height:420px;margin:0;padding:16px;border:0;border-radius:0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px;line-height:1.5}
+.option-wide{grid-column:1/-1;margin:0}
+@media(max-width:720px){.system-breakdown li,.index-pattern summary,.index-rows>div{align-items:flex-start;flex-direction:column;display:flex}.index-rows span{text-align:left}.service-log-controls{align-items:stretch;flex-direction:column}.ruf-domains p{grid-template-columns:1fr}.service-log-file>div{flex-direction:column;gap:4px}}

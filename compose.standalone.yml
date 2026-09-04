@@ -19,6 +19,7 @@ services:
       OPENSEARCH_USERNAME: admin
       OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?Set the OpenSearch administrator password}
       OPENSEARCH_VERIFY_TLS: "false"
+      SERVICE_LOGS_ENABLED: "true"
     volumes:
       - type: bind
         source: ${MAILPOSTURE_SETTINGS_PATH:-${ROOT:?Set ROOT to the parent directory for persistent application data}/mailposture/settings}
@@ -26,6 +27,10 @@ services:
       - type: volume
         source: parsedmarc_status
         target: /run/parsedmarc
+        read_only: true
+      - type: volume
+        source: opensearch_logs
+        target: /logs/opensearch
         read_only: true
     expose:
       - "8080"
@@ -68,6 +73,9 @@ services:
       - type: bind
         source: ${OPENSEARCH_SNAPSHOT_PATH:-${ROOT}/mailposture/opensearch/snapshots}
         target: /usr/share/opensearch/snapshots
+      - type: volume
+        source: opensearch_logs
+        target: /usr/share/opensearch/logs
     networks:
       - backend
     healthcheck:
@@ -90,6 +98,22 @@ services:
     command:
       - |
         child=""
+        log_tail=""
+        log_file="/run/mailposture/parsedmarc.log"
+        touch "$$log_file"
+        chmod 644 "$$log_file"
+        tail -n 0 -f "$$log_file" &
+        log_tail="$$!"
+        log_message() {
+          printf '%s %s\n' "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$*" >> "$$log_file"
+        }
+        trim_log() {
+          log_size="$$(wc -c < "$$log_file" 2>/dev/null || echo 0)"
+          if [ "$$log_size" -gt 5242880 ]; then
+            tail -c 2097152 "$$log_file" > "$$log_file.tmp" && cat "$$log_file.tmp" > "$$log_file"
+            rm -f "$$log_file.tmp"
+          fi
+        }
         write_status() {
           status_state="$$1"
           status_exit="$${2:-null}"
@@ -106,6 +130,9 @@ services:
             kill -TERM "$$child" 2>/dev/null || true
             wait "$$child" 2>/dev/null || true
           fi
+          if [ -n "$$log_tail" ]; then
+            kill -TERM "$$log_tail" 2>/dev/null || true
+          fi
           write_status stopped 0
           exit 0
         }
@@ -113,12 +140,13 @@ services:
         while true; do
           while ! grep -q '^\[mailbox\]' /etc/parsedmarc/config.ini 2>/dev/null; do
             write_status waiting_config null
-            echo "Waiting for report mailbox settings to be enabled in MailPosture"
+            log_message "Waiting for report mailbox settings to be enabled in MailPosture"
             sleep 10
           done
           checksum="$$(cksum < /etc/parsedmarc/config.ini)"
           write_status starting null
-          parsedmarc -c /etc/parsedmarc/config.ini &
+          log_message "Starting parsedmarc"
+          parsedmarc -c /etc/parsedmarc/config.ini >> "$$log_file" 2>&1 &
           child="$$!"
           write_status running null
           while kill -0 "$$child" 2>/dev/null; do
@@ -126,13 +154,14 @@ services:
             updated="$$(cksum < /etc/parsedmarc/config.ini 2>/dev/null || true)"
             if [ "$$updated" != "$$checksum" ]; then
               write_status reloading null
-              echo "MailPosture settings changed; reloading parsedmarc"
+              log_message "MailPosture settings changed; reloading parsedmarc"
               kill -TERM "$$child" 2>/dev/null || true
               wait "$$child" 2>/dev/null || true
               child=""
               break
             fi
             write_status running null
+            trim_log
           done
           if [ -n "$$child" ]; then
             wait "$$child" 2>/dev/null
@@ -164,6 +193,8 @@ services:
 volumes:
   parsedmarc_status:
     name: ${PARSEDMARC_STATUS_VOLUME:-mailposture_parsedmarc_status}
+  opensearch_logs:
+    name: ${OPENSEARCH_LOG_VOLUME:-mailposture_opensearch_logs}
 
 networks:
   backend:
