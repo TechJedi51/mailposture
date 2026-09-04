@@ -183,6 +183,34 @@ function validCron(value) {
   });
 }
 
+function normalizeBimiExceptions(input = {}, monitoredDomains = []) {
+  const output = {};
+  for (const [rawDomain, rawException] of Object.entries(input || {})) {
+    const domain = String(rawDomain).trim().toLowerCase().replace(/\.$/, '');
+    if (!validDomain(domain) || !monitoredDomains.includes(domain)) continue;
+    const exception = rawException || {};
+    if (exception.mode === 'permanent') {
+      output[domain] = { mode: 'permanent' };
+      continue;
+    }
+    if (exception.mode === 'until') {
+      const timestamp = Date.parse(exception.expires_at);
+      if (!Number.isFinite(timestamp)) throw new Error(`Invalid BIMI exception expiration for ${domain}`);
+      output[domain] = { mode: 'until', expires_at: new Date(timestamp).toISOString() };
+    }
+  }
+  return output;
+}
+
+function activeBimiException(exception, now = Date.now()) {
+  if (exception?.mode === 'permanent') return { active: true, mode: 'permanent', label: 'permanently' };
+  if (exception?.mode === 'until') {
+    const timestamp = Date.parse(exception.expires_at);
+    if (Number.isFinite(timestamp) && timestamp > now) return { active: true, mode: 'until', expires_at: new Date(timestamp).toISOString(), label: `until ${new Date(timestamp).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })}` };
+  }
+  return { active: false };
+}
+
 function normalizeSettings(input = {}) {
   const domains = [...new Set((Array.isArray(input.monitored_domains) ? input.monitored_domains : []).map(v => String(v).trim().toLowerCase().replace(/\.$/, '')).filter(Boolean))];
   for (const domain of domains) if (!validDomain(domain)) throw new Error(`Invalid monitored domain: ${domain}`);
@@ -222,10 +250,11 @@ function normalizeSettings(input = {}) {
   const snapshotMax = boundedNumber(input.snapshots?.max_count, 60, 1, 10000, 'Maximum snapshots');
   if (snapshotMin > snapshotMax) throw new Error('Minimum snapshots cannot exceed maximum snapshots');
   return {
-    schema_version: 3,
+    schema_version: 4,
     monitored_domains: domains,
     dkim_selectors: selectors,
     tls_endpoints: endpoints,
+    bimi_exceptions: normalizeBimiExceptions(input.bimi_exceptions, domains),
     report_days: boundedNumber(input.report_days, 7, 1, 365, 'Report days'),
     refresh_minutes: boundedNumber(input.refresh_minutes, 15, 1, 1440, 'Refresh minutes'),
     request_timeout_ms: boundedNumber(input.request_timeout_ms, 8000, 1000, 60000, 'Request timeout'),
@@ -417,6 +446,7 @@ function settingsConfig(settings = getSettings()) {
       domain,
       dkim_selectors: settings.dkim_selectors[domain] || [],
       tls_endpoints: settings.tls_endpoints[domain] || [],
+      bimi_exception: settings.bimi_exceptions[domain] || null,
       report_days: settings.report_days
     }))
   };
@@ -662,7 +692,7 @@ async function tlsRpt(domain) {
   return result('tls_rpt', 'TLS reporting', 'warning', 'Reports unavailable', 'No valid TLSRPTv1 record with rua was found.', 'Publish a TLS-RPT record so delivery failures are observable.');
 }
 
-async function bimi(domain, dmarcResult) {
+async function bimi(domain, dmarcResult, configuredException = null) {
   bimiLogos.delete(domain);
   try {
     const found = protocol(await txt(`default._bimi.${domain}`), 'v=BIMI1');
@@ -673,7 +703,10 @@ async function bimi(domain, dmarcResult) {
     const logo = await get(parsed.l, 2097152); const safeSvg = logo.status === 200 && /<svg\b/i.test(logo.body) && !/<script\b|javascript:|<foreignObject\b/i.test(logo.body);
     if (!safeSvg) return result('bimi', 'BIMI', 'critical', 'Logo cannot be validated', `Logo endpoint returned HTTP ${logo.status}.`, 'Serve a safe, compliant SVG directly over HTTPS.', { record: found[0], logo_status: logo.status });
     bimiLogos.set(domain, { body: logo.body, etag: crypto.createHash('sha256').update(logo.body).digest('hex') });
-    return result('bimi', 'BIMI', parsed.a ? 'healthy' : 'warning', parsed.a ? 'Logo and certificate published' : 'Self-asserted logo', parsed.a ? 'Record, logo, and evidence URL are present.' : 'No VMC/CMC evidence URL is published.', parsed.a ? 'Recheck after changes.' : 'Consider a VMC or CMC for broader support.', { record: found[0], tags: parsed, logo_available: true });
+    if (parsed.a) return result('bimi', 'BIMI', 'healthy', 'Logo and certificate published', 'Record, logo, and evidence URL are present.', 'Recheck after changes.', { record: found[0], tags: parsed, logo_available: true });
+    const ignored = activeBimiException(configuredException);
+    if (ignored.active) return result('bimi', 'BIMI', 'ignored', 'Self-asserted logo · Ignored', `No VMC/CMC evidence URL is published. This review item is ignored ${ignored.label}.`, 'No action is required while this exception remains active. Edit the domain to change or remove it.', { record: found[0], tags: parsed, logo_available: true, ignored: true, ignore_mode: ignored.mode, ignored_until: ignored.expires_at || null, original_status: 'warning' });
+    return result('bimi', 'BIMI', 'warning', 'Self-asserted logo', 'No VMC/CMC evidence URL is published.', 'Consider a VMC or CMC for broader support, or ignore this review item in the domain settings.', { record: found[0], tags: parsed, logo_available: true });
   } catch (error) { return result('bimi', 'BIMI', 'warning', 'Not configured', error.message, 'Publish BIMI after DMARC enforcement is ready.'); }
 }
 
@@ -844,9 +877,9 @@ async function smtpTlsReports(domain, config, days) {
   } catch (error) { return { available: false, reports: 0, error: error.message, period_days: days }; }
 }
 
-function summarize(domain, checks, reportSections = {}) { const rank = { healthy: 0, info: 1, warning: 2, critical: 3 }; return { domain, status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'), checks, reports: reportSections, counts: { critical: checks.filter(v => v.status === 'critical').length, warning: checks.filter(v => v.status === 'warning').length, healthy: checks.filter(v => v.status === 'healthy').length } }; }
+function summarize(domain, checks, reportSections = {}) { const rank = { healthy: 0, ignored: 0, info: 1, warning: 2, critical: 3 }; return { domain, status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'), checks, reports: reportSections, counts: { critical: checks.filter(v => v.status === 'critical').length, warning: checks.filter(v => v.status === 'warning').length, ignored: checks.filter(v => v.status === 'ignored').length, healthy: checks.filter(v => v.status === 'healthy').length } }; }
 async function checkDomain(entry, config) {
-  const dm = await dmarc(entry.domain); const [sts, tlsreport, brand, keys, aggregate, failures, smtpTls, ...certs] = await Promise.all([mtaSts(entry.domain), tlsRpt(entry.domain), bimi(entry.domain, dm), dkim(entry.domain, entry.dkim_selectors), reports(entry.domain, config.opensearch, entry.report_days), failureReports(entry.domain, config.opensearch, entry.report_days), smtpTlsReports(entry.domain, config.opensearch, entry.report_days), ...entry.tls_endpoints.map(certificate)]);
+  const dm = await dmarc(entry.domain); const [sts, tlsreport, brand, keys, aggregate, failures, smtpTls, ...certs] = await Promise.all([mtaSts(entry.domain), tlsRpt(entry.domain), bimi(entry.domain, dm, entry.bimi_exception), dkim(entry.domain, entry.dkim_selectors), reports(entry.domain, config.opensearch, entry.report_days), failureReports(entry.domain, config.opensearch, entry.report_days), smtpTlsReports(entry.domain, config.opensearch, entry.report_days), ...entry.tls_endpoints.map(certificate)]);
   if (!certs.length) certs.push(result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
   return summarize(entry.domain, [dm, aggregate, keys, sts, tlsreport, ...certs, brand], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls });
 }
@@ -854,7 +887,7 @@ function demo() { const aggregate = { period_days: 7, total: 15234, passed: 1398
 
 async function refresh() {
   if (activeRefresh) return activeRefresh; snapshot.refreshing = true;
-  activeRefresh = (async () => { try { const config = process.env.DEMO_MODE === 'true' ? null : settingsConfig(); const domains = config ? await Promise.all(config.domains.map(v => checkDomain(v, config))) : [demo()]; snapshot = { version: APP_VERSION, generated_at: new Date().toISOString(), refreshing: false, configuration_required: !domains.length, domains, summary: { critical: domains.reduce((n,d)=>n+d.counts.critical,0), warning: domains.reduce((n,d)=>n+d.counts.warning,0), healthy: domains.reduce((n,d)=>n+d.counts.healthy,0) } }; } catch (error) { addDiagnosticEvent('mailposture', 'error', 'Domain checks failed', error.message); snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message }; } finally { activeRefresh = null; } return snapshot; })(); return activeRefresh;
+  activeRefresh = (async () => { try { const config = process.env.DEMO_MODE === 'true' ? null : settingsConfig(); const domains = config ? await Promise.all(config.domains.map(v => checkDomain(v, config))) : [demo()]; snapshot = { version: APP_VERSION, generated_at: new Date().toISOString(), refreshing: false, configuration_required: !domains.length, domains, summary: { critical: domains.reduce((n,d)=>n+d.counts.critical,0), warning: domains.reduce((n,d)=>n+d.counts.warning,0), ignored: domains.reduce((n,d)=>n+(d.counts.ignored || 0),0), healthy: domains.reduce((n,d)=>n+d.counts.healthy,0) } }; } catch (error) { addDiagnosticEvent('mailposture', 'error', 'Domain checks failed', error.message); snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message }; } finally { activeRefresh = null; } return snapshot; })(); return activeRefresh;
 }
 
 function serveBimiLogo(res, requestUrl) {
@@ -895,4 +928,4 @@ const server = http.createServer(async (req,res) => {
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); addDiagnosticEvent('mailposture', 'info', 'MailPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, activeBimiException, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, refresh, getSnapshot:()=>snapshot };

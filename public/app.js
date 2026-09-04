@@ -2,7 +2,7 @@
 
 const $ = selector => document.querySelector(selector);
 const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/' };
-const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info' };
+const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info', ignored: 'Ignored' };
 const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -19,7 +19,7 @@ function ago(value) {
 }
 
 function score(domain) {
-  const weights = { critical: 0, warning: .55, info: .8, healthy: 1 };
+  const weights = { critical: 0, warning: .55, info: .8, ignored: 1, healthy: 1 };
   return domain.checks.length ? Math.round(domain.checks.reduce((total, check) => total + weights[check.status], 0) / domain.checks.length * 100) : 0;
 }
 
@@ -141,7 +141,8 @@ function renderDashboard() {
   $('#master-score').innerHTML = `<strong>${master}</strong><span>Master score out of 100</span><div class="bar"><i style="width:${master}%"></i></div>`;
   $('#domain-scores').innerHTML = data.domains.map((domain, index) => {
     const value = domainScores[index];
-    return `<button class="domain-score-card" data-open-domain="${index}"><div class="domain-score-top"><span>${statusSymbol(domain.status)}${esc(domain.domain)}</span><span class="state ${domain.status}">${names[domain.status]}</span></div><strong>${value}</strong><div class="bar"><i style="width:${value}%"></i></div><p>${domain.counts.critical} critical · ${domain.counts.warning} review</p></button>`;
+    const ignored = domain.counts.ignored ? ` · ${domain.counts.ignored} ignored` : '';
+    return `<button class="domain-score-card" data-open-domain="${index}"><div class="domain-score-top"><span>${statusSymbol(domain.status)}${esc(domain.domain)}</span><span class="state ${domain.status}">${names[domain.status]}</span></div><strong>${value}</strong><div class="bar"><i style="width:${value}%"></i></div><p>${domain.counts.critical} critical · ${domain.counts.warning} review${ignored}</p></button>`;
   }).join('');
   $('#master-issue-count').textContent = issueCount ? `${issueCount} open` : 'Clear';
   $('#master-attention').innerHTML = issueCount ? data.domains.map((domain, domainIndex) => {
@@ -337,7 +338,16 @@ function renderSettingsDomains() {
   $('#settings-domain-list').innerHTML = settings.monitored_domains.length ? settings.monitored_domains.map((domain, index) => {
     const selectors = settings.dkim_selectors[domain] || [];
     const endpoints = settings.tls_endpoints[domain] || [];
-    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
+    const exception = settings.bimi_exceptions?.[domain];
+    const expires = exception?.mode === 'until' ? new Date(exception.expires_at) : null;
+    const bimiNote = exception?.mode === 'permanent'
+      ? ' · BIMI review ignored permanently'
+      : expires instanceof Date && Number.isFinite(expires.valueOf()) && expires > new Date()
+        ? ` · BIMI review ignored until ${expires.toLocaleDateString()}`
+        : expires instanceof Date && Number.isFinite(expires.valueOf())
+          ? ` · BIMI review exception expired ${expires.toLocaleDateString()}`
+          : '';
+    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}${esc(bimiNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
   }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
 
@@ -442,11 +452,17 @@ function renderEditorLists() {
 
 function openDomainEditor(index = null) {
   const domain = index === null ? '' : state.settings.monitored_domains[index];
+  const bimiException = clone(state.settings.bimi_exceptions?.[domain] || null);
+  const expiration = bimiException?.mode === 'until' ? new Date(bimiException.expires_at) : null;
+  const activeBimiException = bimiException?.mode === 'permanent' || (expiration instanceof Date && Number.isFinite(expiration.valueOf()) && expiration > new Date());
+  const remainingMonths = activeBimiException && bimiException?.mode === 'until' ? Math.max(1, Math.ceil((expiration - Date.now()) / 2629800000)) : 6;
   state.editor = {
     index,
     originalDomain: domain,
     selectors: clone(state.settings.dkim_selectors[domain] || []),
     endpoints: clone(state.settings.tls_endpoints[domain] || []),
+    bimiExceptionOriginal: bimiException,
+    bimiExceptionDirty: false,
     editingSelector: null,
     editingEndpoint: null
   };
@@ -457,9 +473,24 @@ function openDomainEditor(index = null) {
   $('#endpoint-host').value = '';
   $('#endpoint-port').value = '443';
   $('#endpoint-add').textContent = '＋';
+  $('#bimi-ignore-mode').value = activeBimiException && bimiException?.mode === 'permanent' ? 'permanent' : activeBimiException && bimiException?.mode === 'until' ? 'temporary' : 'none';
+  $('#bimi-ignore-months').value = remainingMonths;
   $('#domain-message').textContent = '';
   renderEditorLists();
+  updateBimiIgnoreVisibility();
   $('#domain-dialog').showModal();
+}
+
+function updateBimiIgnoreVisibility() {
+  const temporary = $('#bimi-ignore-mode').value === 'temporary';
+  $('#bimi-ignore-months-field').hidden = !temporary;
+  const original = state.editor?.bimiExceptionOriginal;
+  const note = $('#bimi-ignore-expiration');
+  if (!temporary) note.textContent = '';
+  else if (!state.editor?.bimiExceptionDirty && original?.mode === 'until') {
+    const expires = new Date(original.expires_at);
+    note.textContent = expires > new Date() ? `Current exception expires ${expires.toLocaleDateString()}.` : `The previous exception expired ${expires.toLocaleDateString()}. Saving renews it.`;
+  } else note.textContent = 'The exception period begins when Settings are saved.';
 }
 
 function addSelector() {
@@ -503,15 +534,28 @@ function saveDomain(event) {
   if (!valid) return showDomainError('Enter a valid domain name.');
   const duplicate = state.settings.monitored_domains.findIndex((value, index) => value === domain && index !== state.editor.index);
   if (duplicate >= 0) return showDomainError('That domain is already monitored.');
+  const ignoreMode = $('#bimi-ignore-mode').value;
+  let bimiException = null;
+  if (ignoreMode === 'permanent') bimiException = { mode: 'permanent' };
+  else if (ignoreMode === 'temporary') {
+    const months = Number($('#bimi-ignore-months').value);
+    if (!Number.isInteger(months) || months < 1 || months > 120) return showDomainError('Enter a BIMI exception period between 1 and 120 months.');
+    if (!state.editor.bimiExceptionDirty && state.editor.bimiExceptionOriginal?.mode === 'until') bimiException = clone(state.editor.bimiExceptionOriginal);
+    else { const expires = new Date(); expires.setUTCMonth(expires.getUTCMonth() + months); bimiException = { mode: 'until', expires_at: expires.toISOString() }; }
+  }
   const oldDomain = state.editor.originalDomain;
   if (state.editor.index === null) state.settings.monitored_domains.push(domain);
   else state.settings.monitored_domains[state.editor.index] = domain;
   if (oldDomain && oldDomain !== domain) {
     delete state.settings.dkim_selectors[oldDomain];
     delete state.settings.tls_endpoints[oldDomain];
+    if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[oldDomain];
   }
   state.settings.dkim_selectors[domain] = clone(state.editor.selectors);
   state.settings.tls_endpoints[domain] = clone(state.editor.endpoints);
+  state.settings.bimi_exceptions ||= {};
+  if (bimiException) state.settings.bimi_exceptions[domain] = bimiException;
+  else delete state.settings.bimi_exceptions[domain];
   $('#domain-dialog').close();
   renderSettingsDomains();
   $('#settings-message').textContent = 'Domain changes are ready. Save settings to apply them.';
@@ -678,6 +722,8 @@ $('#report-source').onchange = updateSettingsVisibility;
 $('#mailbox-enabled').onchange = updateSettingsVisibility;
 $('#snapshots-enabled').onchange = updateSettingsVisibility;
 $('#archive-folder').oninput = updateSettingsVisibility;
+$('#bimi-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty = true; updateBimiIgnoreVisibility(); };
+$('#bimi-ignore-months').oninput = () => { state.editor.bimiExceptionDirty = true; updateBimiIgnoreVisibility(); };
 $('#log-service').onchange = renderSystemLogs;
 $('#service-log-service').onchange = loadServiceLogs;
 $('#refresh-service-log').onclick = loadServiceLogs;
@@ -733,6 +779,7 @@ document.onclick = event => {
     const removed = state.settings.monitored_domains.splice(index, 1)[0];
     delete state.settings.dkim_selectors[removed];
     delete state.settings.tls_endpoints[removed];
+    if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[removed];
     renderSettingsDomains();
     $('#settings-message').textContent = `${removed} was removed. Save settings to apply this change.`;
     $('#settings-message').className = 'pending';

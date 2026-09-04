@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v1.1.0</small></span>
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v1.2.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
@@ -79,8 +79,8 @@
       <div id="system-status-checks" class="system-status-grid"><div class="clear">Running system checks…</div></div>
     </section>
     <section class="overview-section diagnostic-section">
-      <div class="heading"><div><small>Diagnostics</small><h2>Operational log</h2></div><label class="log-filter" for="log-service"><span>Service</span><select id="log-service"><option value="all">All services</option><option value="mailposture">MailPosture</option><option value="opensearch">OpenSearch</option><option value="parsedmarc">ParseDMARC</option></select></label></div>
-      <p class="diagnostic-note">Shows privacy-safe status changes from this MailPosture session. Passwords, message content, and raw container output are not included.</p>
+      <div class="heading"><div><small>Diagnostics</small><h2>Event history</h2></div><label class="log-filter" for="log-service"><span>Service</span><select id="log-service"><option value="all">All services</option><option value="mailposture">MailPosture</option><option value="opensearch">OpenSearch</option><option value="parsedmarc">ParseDMARC</option></select></label></div>
+      <p class="diagnostic-note">Shows privacy-safe status changes from this MailPosture session. Entries are historical and do not replace the current status cards above. Passwords, message content, and raw container output are not included.</p>
       <div id="system-log" class="system-log" aria-live="polite"><div class="clear">Loading diagnostics…</div></div>
     </section>
     <section class="overview-section diagnostic-section">
@@ -244,6 +244,12 @@
         <div><h3>TLS certificates</h3><p>Add every direct-TLS host and port whose certificate should be monitored.</p></div>
         <div id="endpoint-list" class="editable-list compact-list"></div>
         <div class="inline-editor endpoint-editor"><input id="endpoint-host" type="text" placeholder="mail.example.com" aria-label="TLS host"><input id="endpoint-port" type="number" min="1" max="65535" value="443" aria-label="TLS port"><button id="endpoint-add" class="symbol-button" type="button" aria-label="Add TLS endpoint" title="Add endpoint">＋</button></div>
+      </section>
+      <section class="editor-section">
+        <div><h3>BIMI review exception</h3><p>Hide only the “Self-asserted logo” review item. MailPosture continues checking the BIMI record and logo, and other BIMI problems still require attention.</p></div>
+        <div class="field"><label for="bimi-ignore-mode">Self-asserted logo</label><select id="bimi-ignore-mode"><option value="none">Continue showing Review</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
+        <div id="bimi-ignore-months-field" class="field" hidden><label for="bimi-ignore-months">Number of months</label><input id="bimi-ignore-months" type="number" min="1" max="120" value="6"><p id="bimi-ignore-expiration"></p></div>
+        <p class="settings-note">An ignored result remains visible on the BIMI card and is labeled Ignored. It is removed from the attention queue and does not lower the posture score.</p>
       </section>
       <p id="domain-message" class="failure" role="alert"></p>
       <div class="dialog-actions"><button class="secondary domain-cancel" type="button">Cancel</button><button type="submit">Save domain</button></div>
