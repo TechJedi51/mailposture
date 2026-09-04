@@ -20,9 +20,9 @@ Use `docker-compose.yml` when parsedmarc and OpenSearch already exist. Use `comp
 
 ## Interface
 
-- **Dashboard** shows the organization-wide score, domain scores, open issues, aggregate DMARC trends, DMARC failure-report counts, and SMTP TLS results.
+- **Dashboard** shows the organization-wide score, domain scores, open issues, stacked aggregate DMARC trends, optional DMARC failure-report counts, and stacked SMTP TLS results.
 - **Domains** shows the detailed status, report center, attention queue, evidence, and control matrix for one domain at a time.
-- **System Status** directly checks MailPosture storage and refreshes, OpenSearch authentication and cluster health, report indexes, the generated ParseDMARC configuration, and the bundled collector heartbeat.
+- **System Status** directly checks MailPosture storage and refreshes, OpenSearch authentication and cluster health, report indexes, the generated ParseDMARC configuration, and the bundled collector heartbeat. Its operational log records privacy-safe status changes for these checks without exposing unrestricted Docker logs or message content.
 - **Settings** separates monitored domains, appearance, OpenSearch, and parsedmarc configuration into accessible tabs with keyboard navigation.
 - **Help** explains setup, every check, and the terminology used by the application.
 
@@ -69,7 +69,21 @@ The standalone stack also uses the small `parsedmarc_status` Docker volume for a
 
 `Archive/SMTP-TLS` contains the original TLS-RPT messages after parsedmarc processes them. MailPosture does not read or parse that folder. It reads the normalized documents that parsedmarc writes to the configured `smtp_tls*` OpenSearch index, which prevents duplicate processing and mailbox conflicts.
 
+DMARC aggregate failures and DMARC failure reports are different measurements. Aggregate reports count messages that failed DMARC. Failure reports, also called RUF or forensic reports, are optional individual reports that many receivers do not send. It is therefore normal for an aggregate report to show failed messages while the RUF report count is zero. MailPosture shows only RUF counts because those reports may contain personal or confidential message data.
+
+TLS reporting organizations are the outside mail providers that sent TLS-RPT data about delivery attempts to a monitored domain. Their values count SMTP sessions, not email messages. MailPosture shows the normalized organization name and session total and provides an expandable raw-data view of those fields.
+
+When BIMI publishes a safe SVG logo over HTTPS and passes validation, MailPosture displays it on the BIMI control card through a same-origin, sandboxed image response. Remote logo markup is not inserted into the page.
+
 The parsedmarc tab manages the general, mailbox, IMAP, and OpenSearch options used by the bundled IMAP-to-OpenSearch pipeline. Less common outputs and collectors, including Kafka, S3, Splunk, Gmail API, and Microsoft Graph, remain advanced file-based configuration. MailPosture does not parse, move, or delete report messages itself; parsedmarc performs the configured mailbox actions.
+
+### System Status troubleshooting
+
+A yellow OpenSearch cluster is expected when a single-node cluster has replica shards configured because OpenSearch will not place a replica on the same node as its primary. Set **Replicas** to `0` under **Settings → ParseDMARC → OpenSearch output** for new indexes. Existing indexes must also have `index.number_of_replicas` changed to `0` through the OpenSearch `_settings` API. Multi-node clusters should normally retain replicas.
+
+An unavailable index pattern means OpenSearch has no matching index yet. Confirm that the corresponding report type is enabled in ParseDMARC and that matching messages reach the configured mailbox. The index appears after parsedmarc saves the first report. A missing RUF/forensic index can require no action because those reports are optional.
+
+The in-app operational log is intentionally limited to state changes detected by MailPosture. For full container output, run `docker logs --tail 200 mailposture`, `docker logs --tail 200 parsedmarc`, or `docker logs --tail 200 parsedmarc-opensearch` on the Docker host. Review logs before sharing them because they can contain host names, addresses, or message metadata.
 
 Failure reports can contain message headers or content. MailPosture shows counts but intentionally does not display those samples.
 

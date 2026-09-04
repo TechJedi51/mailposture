@@ -1,7 +1,7 @@
 'use strict';
 
 const $ = selector => document.querySelector(selector);
-const state = { data: null, system: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/' };
+const state = { data: null, system: null, logs: [], selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/' };
 const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info' };
 const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
@@ -55,7 +55,7 @@ function reportId(id) { return id ? ` id="${esc(id)}" tabindex="-1"` : ''; }
 function aggregateCard(report, wide = false, id = '') {
   if (!report?.total) return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>Authentication results reported by receiving email services.</p></div></div><p class="report-empty">No aggregate report data was found for this period.</p></article>`;
   const passed = Math.max(0, Number(report.total) - Number(report.failed || 0));
-  return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>${number(report.total)} messages observed over ${number(report.period_days)} days</p></div><span class="report-value">${report.pass_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.failed)}</strong><span>DMARC failures</span></div><div class="metric"><strong>${report.dkim_pass_rate ?? '—'}%</strong><span>DKIM aligned</span></div><div class="metric"><strong>${report.spf_pass_rate ?? '—'}%</strong><span>SPF aligned</span></div></div>${trendChart((report.timeline || []).map(item => ({...item, passed: Math.max(0, item.total - item.failed)})), 'passed', 'failed', `DMARC daily results: ${number(passed)} successful and ${number(report.failed)} failed`)}</article>`;
+  return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>${number(report.total)} messages observed over ${number(report.period_days)} days</p></div><span class="report-value">${report.pass_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.failed)}</strong><span>Messages failing DMARC</span></div><div class="metric"><strong>${report.dkim_pass_rate ?? '—'}%</strong><span>DKIM aligned</span></div><div class="metric"><strong>${report.spf_pass_rate ?? '—'}%</strong><span>SPF aligned</span></div></div><p class="report-explanation">This is the number of messages that failed DMARC in aggregate reports. It is separate from optional RUF/forensic report files.</p>${trendChart((report.timeline || []).map(item => ({...item, passed: Math.max(0, item.total - item.failed)})), 'passed', 'failed', `Stacked DMARC daily results: ${number(passed)} successful and ${number(report.failed)} failed`)}</article>`;
 }
 
 function smtpTlsCard(report, id = '') {
@@ -64,11 +64,16 @@ function smtpTlsCard(report, id = '') {
 }
 
 function failureCard(report, id = '') {
-  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>DMARC failure reports</h3><p>Individual authentication failure notices</p></div><span class="report-value">${report?.available ? number(report.count) : '—'}</span></div><p class="privacy-note">${esc(report?.privacy_note || report?.error || 'Failure report data is not available.')}</p></article>`;
+  const explanation = report?.available
+    ? `${number(report.count)} optional RUF/forensic report file${Number(report.count) === 1 ? '' : 's'} received. A zero here does not mean that no messages failed DMARC; those failures are counted in aggregate reports.`
+    : 'No RUF/forensic index is available. These reports are optional, and many receiving services do not send them.';
+  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>DMARC failure (RUF) reports</h3><p>Optional individual or forensic reports, separate from aggregate failed-message counts</p></div><span class="report-value">${report?.available ? number(report.count) : '—'}</span></div><p class="report-explanation">${esc(explanation)}</p><p class="privacy-note">${esc(report?.privacy_note || report?.error || 'Message samples are not displayed because they may contain personal or confidential content.')}</p></article>`;
 }
 
 function reportingOrganizationsCard(report, id = '') {
-  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>TLS reporting organizations</h3><p>Services that supplied SMTP TLS results</p></div></div>${rankedList(report?.organizations, 'name', 'sessions', 'No TLS reporting organizations were found.')}</article>`;
+  const organizations = report?.organizations || [];
+  const raw = organizations.length ? `<details class="raw-data"><summary>Show raw organization data</summary><pre>${esc(JSON.stringify(organizations, null, 2))}</pre></details>` : '';
+  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>TLS reporting organizations</h3><p>Mail providers that sent TLS-RPT data about delivery attempts to your domain</p></div></div><p class="report-explanation">Each value is the number of reported SMTP delivery sessions, not messages. Use this list to see which outside providers are reporting and to identify whether a TLS problem is concentrated at one sender.</p>${rankedList(organizations, 'name', 'sessions', 'No TLS reporting organizations were found.')}${raw}</article>`;
 }
 
 function detailCards(reports) {
@@ -133,7 +138,7 @@ function renderDashboard() {
   $('#master-attention').innerHTML = issueCount ? data.domains.map((domain, domainIndex) => {
     const issues = issuesFor(domain);
     if (!issues.length) return '';
-    return `<section class="attention-group"><div class="attention-group-heading"><h3>${esc(domain.domain)}</h3><button data-open-domain="${domainIndex}">View domain →</button></div>${issues.map(check => `<article class="issue ${check.status}"><span class="icon">${check.status === 'critical' ? '!' : '•'}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-dashboard-check="${esc(check.id)}" data-domain-index="${domainIndex}">View →</button></article>`).join('')}</section>`;
+    return `<section class="attention-group"><div class="attention-group-heading"><h3>${esc(domain.domain)}</h3><button data-open-domain="${domainIndex}">View domain →</button></div>${issues.map(check => `<article class="issue ${check.status}"><span class="issue-status">${statusSymbol(check.status)}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-dashboard-check="${esc(check.id)}" data-domain-index="${domainIndex}">View →</button></article>`).join('')}</section>`;
   }).join('') : '<div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
   const reports = organizationReports(data.domains);
   $('#organization-reports').innerHTML = `${aggregateCard(reports.aggregate)}${smtpTlsCard(reports.smtp_tls)}${failureCard(reports.failure)}${reportingOrganizationsCard(reports.smtp_tls)}`;
@@ -165,10 +170,12 @@ function renderDomain() {
   const posture = score(domain);
   $('#hero').innerHTML = `<div><small>${esc(domain.domain)} · Current posture</small><h1>${domain.counts.critical ? `${domain.counts.critical} issue${domain.counts.critical === 1 ? '' : 's'} need attention.` : domain.counts.warning ? 'Protected, with room to improve.' : 'Mail controls look solid.'}</h1><p>Live policy checks and observed authentication results, translated into the next useful action.</p></div><div class="score"><strong>${posture}</strong><span>Posture score out of 100</span><div class="bar"><i style="width:${posture}%"></i></div></div>`;
   $('#domains').innerHTML = data.domains.map((value, index) => `<button class="domain ${index === state.selected ? 'active' : ''}" data-domain="${index}">${statusSymbol(value.status)}${esc(value.domain)}</button>`).join('');
-  $('#attention').innerHTML = issues.length ? `<div class="attention-head"><h2>Attention queue</h2><span class="pill">${issues.length} open</span></div>${issues.map(check => `<article class="issue ${check.status}"><span class="icon">${check.status === 'critical' ? '!' : '•'}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-check="${esc(check.id)}">View →</button></article>`).join('')}` : '<div class="attention-head"><h2>Attention queue</h2><span class="pill">Clear</span></div><div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
+  $('#attention').innerHTML = issues.length ? `<div class="attention-head"><h2>Attention queue</h2><span class="pill">${issues.length} open</span></div>${issues.map(check => `<article class="issue ${check.status}"><span class="issue-status">${statusSymbol(check.status)}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-check="${esc(check.id)}">View →</button></article>`).join('')}` : '<div class="attention-head"><h2>Attention queue</h2><span class="pill">Clear</span></div><div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
   $('#checks').innerHTML = domain.checks.map(check => {
     const endpoint = tlsEndpoint(check, domain.domain);
-    return `<button class="card" data-check="${esc(check.id)}"><div class="card-top"><span><span class="label">${esc(check.label)}</span>${endpoint ? `<span class="card-context">${esc(endpoint)}</span>` : ''}</span><span class="state ${check.status}">${names[check.status]}</span></div><h3>${esc(check.summary)}</h3><p>${esc(check.detail)}</p></button>`;
+    const days = check.label === 'TLS certificate' && Number.isFinite(Number(check.evidence?.days_remaining)) ? Number(check.evidence.days_remaining) : null;
+    const bimiLogo = check.id === 'bimi' && check.evidence?.logo_available ? `<img class="bimi-logo" src="/api/bimi-logo?domain=${encodeURIComponent(domain.domain)}" alt="BIMI logo for ${esc(domain.domain)}">` : '';
+    return `<button class="card ${esc(check.status)}${days === null ? '' : ' tls-card'}${bimiLogo ? ' bimi-card' : ''}" data-check="${esc(check.id)}">${days === null ? '' : `<span class="certificate-days" aria-hidden="true">${number(days)}</span>`}<div class="card-content"><div class="card-top"><span><span class="label">${esc(check.label)}</span>${endpoint ? `<span class="card-context">${esc(endpoint)}</span>` : ''}</span><span class="state ${check.status}">${names[check.status]}</span></div>${bimiLogo}<h3>${esc(check.summary)}</h3><p>${esc(check.detail)}</p></div></button>`;
   }).join('');
   $('#domain-reports').innerHTML = detailCards(domain.reports);
 }
@@ -181,9 +188,9 @@ function renderStatus() {
   renderDomain();
 }
 
-function systemSettingsSection(id) {
-  if (id === 'opensearch' || id === 'report_indices') return 'opensearch';
-  if (id.startsWith('parsedmarc')) return 'parsedmarc';
+function systemSettingsSection(check) {
+  if (check.id === 'opensearch') return check.evidence?.recommended_for_single_node ? 'parsedmarc' : 'opensearch';
+  if (check.id === 'report_indices' || check.id.startsWith('parsedmarc')) return 'parsedmarc';
   return null;
 }
 
@@ -204,9 +211,30 @@ function renderSystemStatus() {
   const counts = (data.checks || []).reduce((totals, check) => ({ ...totals, [check.status]: (totals[check.status] || 0) + 1 }), {});
   $('#system-status-summary').innerHTML = `${statusSymbol(status)}<div><strong>${names[status] || 'Unavailable'}</strong><span>${counts.critical || 0} need action · ${counts.warning || 0} review · ${counts.healthy || 0} healthy</span></div>`;
   $('#system-status-checks').innerHTML = (data.checks || []).map(check => {
-    const section = systemSettingsSection(check.id);
-    return `<article class="system-status-card ${esc(check.status)}"><div class="system-status-card-heading">${statusSymbol(check.status)}<div><span class="state ${esc(check.status)}">${esc(names[check.status] || check.status)}</span><h3>${esc(check.label)}</h3></div></div><strong>${esc(check.summary)}</strong><p>${esc(check.detail)}</p>${check.status !== 'healthy' ? `<div class="system-action"><span>Next action</span><p>${esc(check.action)}</p>${section ? `<button type="button" data-system-settings="${section}">Open Settings →</button>` : ''}</div>` : ''}</article>`;
+    const section = systemSettingsSection(check);
+    const technicalDetails = Object.keys(check.evidence || {}).length ? `<details class="system-evidence"><summary>Show technical details</summary><pre>${esc(JSON.stringify(check.evidence, null, 2))}</pre></details>` : '';
+    return `<article class="system-status-card ${esc(check.status)}"><div class="system-status-card-heading">${statusSymbol(check.status)}<div><span class="state ${esc(check.status)}">${esc(names[check.status] || check.status)}</span><h3>${esc(check.label)}</h3></div></div><strong>${esc(check.summary)}</strong><p>${esc(check.detail)}</p>${check.status !== 'healthy' ? `<div class="system-action"><span>Next action</span><p>${esc(check.action)}</p>${section ? `<button type="button" data-system-settings="${section}">Open Settings →</button>` : ''}</div>` : ''}${technicalDetails}</article>`;
   }).join('') || '<div class="clear">No system checks were returned.</div>';
+}
+
+function renderSystemLogs() {
+  const container = $('#system-log');
+  if (!container) return;
+  const service = $('#log-service')?.value || 'all';
+  const events = (state.logs || []).filter(event => service === 'all' || event.service === service);
+  container.innerHTML = events.length ? events.map(event => `<article class="log-entry ${esc(event.level)}"><time datetime="${esc(event.timestamp)}">${esc(new Date(event.timestamp).toLocaleString())}</time><span>${statusSymbol(event.level === 'error' ? 'critical' : event.level === 'warning' ? 'warning' : 'healthy', event.level)}</span><strong>${esc(event.service)}</strong><div><h3>${esc(event.message)}</h3>${event.detail ? `<p>${esc(event.detail)}</p>` : ''}</div></article>`).join('') : '<div class="clear">No diagnostic changes have been recorded for this service during the current MailPosture session.</div>';
+}
+
+async function loadSystemLogs() {
+  try {
+    const response = await fetch('/api/system-logs', { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Unable to load diagnostics');
+    state.logs = data.events || [];
+  } catch (error) {
+    state.logs = [{ timestamp: new Date().toISOString(), service: 'mailposture', level: 'error', message: 'Diagnostic log unavailable', detail: error.message }];
+  }
+  renderSystemLogs();
 }
 
 async function loadSystemStatus() {
@@ -218,6 +246,7 @@ async function loadSystemStatus() {
     state.system = { status: 'critical', checks: [], error: error.message, checked_at: new Date().toISOString() };
   }
   renderSystemStatus();
+  await loadSystemLogs();
 }
 
 function detail(id) {
@@ -594,6 +623,7 @@ $('#report-source').onchange = updateSettingsVisibility;
 $('#mailbox-enabled').onchange = updateSettingsVisibility;
 $('#snapshots-enabled').onchange = updateSettingsVisibility;
 $('#archive-folder').oninput = updateSettingsVisibility;
+$('#log-service').onchange = renderSystemLogs;
 $('#pm-delete').onchange = event => {
   ['#pm-delete-aggregate', '#pm-delete-failure', '#pm-delete-smtp-tls', '#pm-delete-invalid'].forEach(selector => { $(selector).checked = event.target.checked; });
 };

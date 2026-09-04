@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.6.0</small></span>
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v0.7.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
@@ -77,6 +77,11 @@
     <section class="overview-section">
       <div class="heading"><div><small>Checks</small><h2>Reporting pipeline</h2></div><p id="system-status-updated">Checking services…</p></div>
       <div id="system-status-checks" class="system-status-grid"><div class="clear">Running system checks…</div></div>
+    </section>
+    <section class="overview-section diagnostic-section">
+      <div class="heading"><div><small>Diagnostics</small><h2>Operational log</h2></div><label class="log-filter" for="log-service"><span>Service</span><select id="log-service"><option value="all">All services</option><option value="mailposture">MailPosture</option><option value="opensearch">OpenSearch</option><option value="parsedmarc">ParseDMARC</option></select></label></div>
+      <p class="diagnostic-note">Shows privacy-safe status changes from this MailPosture session. Passwords, message content, and raw container output are not included.</p>
+      <div id="system-log" class="system-log" aria-live="polite"><div class="clear">Loading diagnostics…</div></div>
     </section>
   </main>
 
@@ -183,13 +188,22 @@
       <div class="heading"><div><small>Checks</small><h2>What MailPosture evaluates</h2></div></div>
       <div class="glossary-grid">
         <article><h3>DMARC</h3><p>Checks whether the domain publishes one valid DMARC policy, its enforcement level, coverage percentage, and aggregate-report destination.</p></article>
-        <article><h3>DMARC aggregate reports</h3><p>Shows message volume, DMARC, DKIM, and SPF alignment, trends, and the top failing sources without exposing message content.</p></article>
-        <article><h3>DMARC failure reports</h3><p>Shows the number of individual failure reports. MailPosture intentionally does not display message samples because they can contain personal or confidential content.</p></article>
+        <article><h3>DMARC aggregate reports</h3><p>Shows message volume, DMARC, DKIM, and SPF alignment, stacked daily results, and the top failing sources without exposing message content. A failed-message count here does not imply that a matching RUF report exists.</p></article>
+        <article><h3>DMARC failure (RUF) reports</h3><p>Shows the number of optional individual or forensic reports. Many receiving services do not send RUF reports, so zero can be normal even when aggregate data records failed messages. MailPosture does not display message samples because they can contain personal or confidential content.</p></article>
         <article><h3>DKIM</h3><p>Checks each configured selector for a published public key and reports missing, revoked, or weak RSA keys. Selectors must be entered because DNS cannot reliably discover them.</p></article>
         <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, and whether the policy covers every published MX host.</p></article>
-        <article><h3>TLS reporting</h3><p>Checks for a valid TLS-RPT record and summarizes SMTP TLS successes, failures, reporting organizations, and failure types from parsedmarc. Processed TLS-RPT messages normally move to <code>Archive/SMTP-TLS</code>; MailPosture reads the normalized OpenSearch data.</p></article>
+        <article><h3>TLS reporting</h3><p>Checks for a valid TLS-RPT record and summarizes stacked SMTP session results, reporting organizations, and failure types from parsedmarc. A reporting organization is an outside mail provider that supplied TLS-RPT data about its delivery attempts to your domain. The values count SMTP sessions, not messages. Use Show raw organization data when you need the exact names and session totals. Processed reports normally move to <code>Archive/SMTP-TLS</code>; MailPosture reads the normalized OpenSearch data.</p></article>
         <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS on ports 25 and 587 is not currently tested.</p></article>
-        <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published.</p></article>
+        <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published. After validation, the logo appears on the BIMI control card through MailPosture’s same-origin image endpoint.</p></article>
+      </div>
+    </section>
+    <section class="help-section">
+      <div class="heading"><div><small>Troubleshooting</small><h2>System Status and logs</h2></div></div>
+      <div class="glossary-grid">
+        <article><h3>Yellow single-node cluster</h3><p>A single OpenSearch node cannot assign replica shards to itself. In Settings → ParseDMARC → OpenSearch output, set Replicas to 0 for new indexes. Existing indexes also need <code>index.number_of_replicas</code> set to 0 through the OpenSearch <code>_settings</code> API. Keep replicas when you operate multiple data nodes.</p></article>
+        <article><h3>Index pattern unavailable</h3><p>Enable the matching report type in Settings → ParseDMARC and confirm those reports reach the configured mailbox. The index is created only after parsedmarc receives and saves the first matching report. A missing RUF/forensic index can be normal because those reports are optional.</p></article>
+        <article><h3>Operational log</h3><p>The in-app log records state changes detected by MailPosture for its own checks, OpenSearch, and the ParseDMARC heartbeat. It intentionally excludes secrets, email content, and unrestricted Docker logs.</p></article>
+        <article><h3>Full container logs</h3><p>For deeper troubleshooting on the Docker host, use <code>docker logs --tail 200 mailposture</code>, <code>docker logs --tail 200 parsedmarc</code>, or <code>docker logs --tail 200 parsedmarc-opensearch</code>. Review output before sharing it because container logs can contain host names, addresses, or message metadata.</p></article>
       </div>
     </section>
     <section class="help-section">
@@ -199,6 +213,7 @@
         <div><dt>Selector</dt><dd>The label identifying a DKIM public key, such as <code>selector1._domainkey.example.com</code>.</dd></div>
         <div><dt>Policy</dt><dd>DMARC uses none, quarantine, or reject. MTA-STS uses none, testing, or enforce.</dd></div>
         <div><dt>RUA</dt><dd>The address that receives aggregate DMARC or TLS reports.</dd></div>
+        <div><dt>RUF</dt><dd>The optional address that receives individual DMARC failure or forensic reports. Provider support is limited, and these reports can contain sensitive message data.</dd></div>
         <div><dt>MX</dt><dd>A DNS record identifying the servers that receive email for a domain.</dd></div>
         <div><dt>TLS endpoint</dt><dd>A host and port that presents a certificate directly, such as <code>mail.example.com:465</code>.</dd></div>
         <div><dt>Posture score</dt><dd>A summary indicator weighted by control status. It helps prioritize work but does not replace the evidence shown for each check.</dd></div>

@@ -139,3 +139,31 @@ html[data-theme="light"] .action{background:#0c71c312}
 @media(max-width:720px){.topnav .toolbar-button>span:last-child{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.topnav{gap:3px}.topnav .toolbar-button{padding:8px 10px}.header-actions #refresh{padding:8px 10px}.header-actions #refresh .toolbar-label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}}
 @media(max-width:580px){.brand{display:none}.header-actions #refresh{display:inline-flex}.header-actions #updated{display:none}}
 @media(forced-colors:active){.status-symbol,.toolbar-icon{forced-color-adjust:none}}
+
+/* v0.7 reporting clarity, diagnostics, and control visuals */
+html[data-theme="light"] #system-status-tab.system-warning .system-status-icon{color:var(--review-text)}
+
+.chart-column{flex-direction:column-reverse;justify-content:flex-start;align-items:stretch;gap:0;overflow:hidden;border-radius:4px 4px 0 0}
+.chart-bar{flex:0 0 auto;border-radius:0}
+.chart-bar.failed{border-radius:4px 4px 0 0}
+.report-explanation{margin:14px 0 0;color:var(--muted);font-size:12px;line-height:1.55}
+.raw-data{margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+.raw-data pre,.system-evidence pre{max-height:260px;margin:10px 0 0;padding:12px;overflow:auto;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}
+
+.issue-status{display:flex;align-items:center;justify-content:center;width:28px;height:28px}
+.issue-status .status-symbol{width:22px;height:22px}
+
+.card{position:relative;overflow:hidden}
+.card-content{position:relative;z-index:1;width:100%}
+.certificate-days{position:absolute;right:10px;bottom:-20px;z-index:0;color:currentColor;font-size:104px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.08em;opacity:.12;pointer-events:none}
+.tls-card.critical .certificate-days{color:var(--red)}
+.tls-card.warning .certificate-days{color:var(--review)}
+.tls-card:not(.critical):not(.warning) .certificate-days{color:var(--healthy)}
+html[data-theme="light"] .certificate-days{opacity:.09}
+.bimi-card .card-content{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:16px}
+.bimi-card .card-top,.bimi-card h3,.bimi-card p{grid-column:1}
+.bimi-logo{grid-column:2;grid-row:1/4;align-self:center;width:76px;height:76px;padding:8px;border:1px solid var(--line);border-radius:14px;background:#fff;object-fit:contain}
+
+.diagnostic-section{padding-bottom:24px}.diagnostic-note{max-width:760px;margin:-8px 0 18px;color:var(--muted);font-size:12px;line-height:1.55}.log-filter{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;font-weight:700}.log-filter select{min-height:38px}.system-log{display:grid;border:1px solid var(--line);border-radius:16px;background:var(--panel);overflow:hidden}.log-entry{display:grid;grid-template-columns:150px 22px 100px minmax(0,1fr);gap:10px;align-items:start;padding:13px 16px;border-bottom:1px solid var(--line)}.log-entry:last-child{border-bottom:0}.log-entry time,.log-entry>strong{padding-top:2px;color:var(--muted);font-size:11px}.log-entry>strong{text-transform:capitalize}.log-entry h3{margin:0;font-size:13px}.log-entry p{margin:4px 0 0;color:var(--muted);font-size:11px;line-height:1.5}.system-evidence{width:100%;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+
+@media(max-width:720px){.log-entry{grid-template-columns:22px 90px minmax(0,1fr)}.log-entry time{grid-column:1/-1}.bimi-logo{width:62px;height:62px}.certificate-days{font-size:88px}}

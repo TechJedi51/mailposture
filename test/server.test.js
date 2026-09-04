@@ -46,6 +46,7 @@ async function run(){
   assert.strictEqual(app.parsedmarcConfigurationStatus(settings,'[general]\n[imap]\n').status,'critical');
   assert.strictEqual(app.overallStatus([{status:'healthy'},{status:'warning'}]),'warning');
   assert.strictEqual(app.overallStatus([{status:'warning'},{status:'critical'}]),'critical');
+  assert.ok(Array.isArray(app.diagnosticLog().events));
   assert.throws(()=>app.normalizeSettings({parsedmarc:{mailbox:{since:'yesterday'}}}),/number followed by/);
   const smtp=app.summarizeSmtpHits([{_source:{organization_name:'Sender',date_begin:'2026-09-01T00:00:00Z',policies:[{policy_domain:'example.com',successful_session_count:20,failed_session_count:2,failure_details:[{result_type:'validation-failure',failed_session_count:2}]}]}}],'example.com',7);
   assert.strictEqual(smtp.successful,20);
@@ -55,11 +56,15 @@ async function run(){
   assert.strictEqual(app.selectSourceField({source_ip_address:{text:{aggregatable:false}},'source_ip_address.keyword':{keyword:{aggregatable:true}}}),'source_ip_address.keyword');
   assert.strictEqual(app.selectSourceField({source_ip_address:{text:{aggregatable:false}}}),null);
   process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);
+  assert.strictEqual(require('../package.json').version,'0.7.0');
   const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),styles=fs.readFileSync('public/settings.css','utf8'),icon=fs.readFileSync('public/mailposture.svg','utf8'),standalone=fs.readFileSync('compose.standalone.yml','utf8');
   assert.match(page,/MailPosture/);
   assert.match(page,/id="dashboard-view"/);
   assert.match(page,/id="settings-view"/);
   assert.match(page,/id="system-status-view"/);
+  assert.match(page,/id="system-log"/);
+  assert.match(page,/id="log-service"/);
+  assert.match(page,/v0\.7\.0/);
   assert.match(page,/href="\/status"/);
   assert.match(page,/dashboard-icon/);
   assert.match(page,/monitored-domains-icon/);
@@ -89,6 +94,11 @@ async function run(){
   assert.match(client,/renderSettingsDomains/);
   assert.match(client,/organizationReports/);
   assert.match(client,/reportingOrganizationsCard/);
+  assert.match(client,/DMARC failure \(RUF\) reports/);
+  assert.match(client,/api\/system-logs/);
+  assert.match(client,/api\/bimi-logo/);
+  assert.match(client,/certificate-days/);
+  assert.match(client,/issue-status/);
   assert.match(client,/data-report-target/);
   assert.match(client,/selectSettingsTab/);
   assert.ok(fs.existsSync('compose.standalone.yml'));
@@ -112,6 +122,9 @@ async function run(){
   assert.match(styles,/settings\.svg/);
   assert.match(styles,/status\.svg/);
   assert.match(styles,/system-status\.svg/);
+  assert.match(styles,/flex-direction:column-reverse/);
+  assert.match(styles,/system-warning \.system-status-icon\{color:var\(--review-text\)\}/);
+  assert.match(styles,/\.system-log/);
   assert.match(styles,/--review:#ffd60a/i);
   assert.match(icon,/<svg/);
   assert.match(icon,/check mark/i);

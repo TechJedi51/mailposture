@@ -22,6 +22,42 @@ let activeRefresh = null;
 let runtimeSettings = null;
 let refreshTimer = null;
 let requestTimeoutMs = 8000;
+const diagnosticEvents = [];
+const diagnosticStates = new Map();
+const bimiLogos = new Map();
+
+function addDiagnosticEvent(service, level, message, detail = '') {
+  diagnosticEvents.push({
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    service,
+    level,
+    message,
+    detail
+  });
+  if (diagnosticEvents.length > 300) diagnosticEvents.splice(0, diagnosticEvents.length - 300);
+}
+
+function diagnosticService(check) {
+  if (check.id === 'opensearch' || check.id === 'report_indices') return 'opensearch';
+  if (check.id.startsWith('parsedmarc')) return 'parsedmarc';
+  return 'mailposture';
+}
+
+function recordSystemChecks(checks) {
+  for (const check of checks) {
+    const service = diagnosticService(check);
+    const key = `${service}:${check.id}`;
+    const signature = `${check.status}:${check.summary}`;
+    if (diagnosticStates.get(key) === signature) continue;
+    diagnosticStates.set(key, signature);
+    addDiagnosticEvent(service, check.status === 'critical' ? 'error' : check.status === 'warning' ? 'warning' : 'info', check.summary, `${check.label}: ${check.detail}`);
+  }
+}
+
+function diagnosticLog() {
+  return { generated_at: new Date().toISOString(), events: [...diagnosticEvents].reverse() };
+}
 
 function assignments(value) {
   const output = {};
@@ -296,6 +332,7 @@ async function saveSettings(value) {
     try { await configureSnapshots(settingsConfig(settings).opensearch, settings.snapshots); }
     catch (error) { snapshot_notice = `Settings were saved, but the snapshot policy could not be updated: ${error.message}`; }
   }
+  addDiagnosticEvent('mailposture', 'info', 'Settings saved', settings.report_source === 'standalone' ? 'The active ParseDMARC configuration was regenerated.' : 'Runtime settings were updated.');
   return {
     ...publicSettings(settings),
     snapshot_notice,
@@ -355,6 +392,7 @@ async function systemStatus() {
   try { settings = getSettings(); }
   catch (error) {
     const checks = [result('mailposture', 'MailPosture', 'critical', 'Settings unavailable', error.message, 'Verify the persistent data mount and settings file.')];
+    recordSystemChecks(checks);
     return { version: APP_VERSION, checked_at: checkedAt, status: 'critical', checks };
   }
 
@@ -407,7 +445,15 @@ async function systemStatus() {
       const cluster = await osApiRequest(osConfig, '_cluster/health');
       connected = true;
       const clusterStatus = cluster.status === 'red' ? 'critical' : cluster.status === 'yellow' ? 'warning' : 'healthy';
-      checks.push(result('opensearch', 'OpenSearch', clusterStatus, `Cluster ${cluster.status || 'unknown'}`, `Authenticated connection succeeded with ${cluster.number_of_nodes || 0} node${cluster.number_of_nodes === 1 ? '' : 's'} and ${cluster.unassigned_shards || 0} unassigned shards.`, clusterStatus === 'healthy' ? 'No action required.' : clusterStatus === 'warning' ? 'Review unassigned replicas; yellow is common on a single-node cluster when replicas are configured.' : 'Restore the unavailable primary shards before relying on report data.', { cluster_name: cluster.cluster_name, nodes: cluster.number_of_nodes, active_primary_shards: cluster.active_primary_shards, unassigned_shards: cluster.unassigned_shards }));
+      const singleNodeReplicas = clusterStatus === 'warning' && cluster.number_of_nodes === 1 && Number(cluster.unassigned_shards || 0) > 0;
+      const clusterAction = clusterStatus === 'healthy'
+        ? 'No action required.'
+        : singleNodeReplicas
+          ? 'For a single-node deployment, open Settings → ParseDMARC → OpenSearch output and set Replicas to 0 for new indexes. Existing indexes also need index.number_of_replicas set to 0 with the OpenSearch _settings API. Then run checks again. Keep replicas enabled on multi-node clusters.'
+          : clusterStatus === 'warning'
+            ? 'Use OpenSearch allocation explain to identify why the shards are unassigned, correct the reported storage, node, or allocation issue, then run checks again.'
+            : 'Restore the unavailable primary shards before relying on report data. Review OpenSearch logs and use allocation explain to identify the affected indexes.';
+      checks.push(result('opensearch', 'OpenSearch', clusterStatus, `Cluster ${cluster.status || 'unknown'}`, `Authenticated connection succeeded with ${cluster.number_of_nodes || 0} node${cluster.number_of_nodes === 1 ? '' : 's'} and ${cluster.unassigned_shards || 0} unassigned shards.`, clusterAction, { cluster_name: cluster.cluster_name, nodes: cluster.number_of_nodes, active_primary_shards: cluster.active_primary_shards, unassigned_shards: cluster.unassigned_shards, recommended_for_single_node: singleNodeReplicas ? { setting: 'index.number_of_replicas', value: 0, note: 'Apply to existing report indexes with the OpenSearch _settings API.' } : null }));
     } catch (error) {
       checks.push(result('opensearch', 'OpenSearch', 'critical', 'Connection failed', error.message, 'Verify the URL, credentials, network, TLS settings, and OpenSearch container health.'));
     }
@@ -422,10 +468,17 @@ async function systemStatus() {
         catch (error) { return { label, index, count: 0, available: false, error: error.message }; }
       }));
       const unavailable = probes.filter(probe => !probe.available);
-      checks.push(result('report_indices', 'Report indexes', unavailable.length ? 'warning' : 'healthy', unavailable.length ? `${unavailable.length} index pattern${unavailable.length === 1 ? '' : 's'} unavailable` : 'Report indexes queryable', probes.map(probe => `${probe.label}: ${probe.available ? `${probe.count} documents` : 'not found'}`).join(' · '), unavailable.length ? 'Confirm ParseDMARC is configured to save these report types; an index appears after its first matching report.' : 'No action required.', { indexes: probes }));
+      const missingFailureOnly = unavailable.length > 0 && unavailable.every(probe => probe.label === 'DMARC failure');
+      const indexAction = !unavailable.length
+        ? 'No action required.'
+        : missingFailureOnly
+          ? 'DMARC failure (RUF/forensic) reports are optional and many providers do not send them. If you expect them, open Settings → ParseDMARC, enable Save DMARC failure reports, and confirm the domain DMARC record has a ruf= destination delivered to this mailbox. Otherwise, no change is required; the index appears after the first RUF report.'
+          : `Open Settings → ParseDMARC and enable the missing report type${unavailable.length === 1 ? '' : 's'} (${unavailable.map(probe => probe.label).join(', ')}). Confirm matching reports reach the configured mailbox, then run checks after parsedmarc processes the first report.`;
+      checks.push(result('report_indices', 'Report indexes', unavailable.length ? 'warning' : 'healthy', unavailable.length ? `${unavailable.length} index pattern${unavailable.length === 1 ? '' : 's'} unavailable` : 'Report indexes queryable', probes.map(probe => `${probe.label}: ${probe.available ? `${probe.count} documents` : 'not found'}`).join(' · '), indexAction, { indexes: probes, optional_report_note: missingFailureOnly ? 'RUF/forensic reporting is optional and is separate from failed-message counts in aggregate reports.' : null }));
     }
   }
 
+  recordSystemChecks(checks);
   return { version: APP_VERSION, checked_at: checkedAt, status: overallStatus(checks), checks };
 }
 function tags(record) {
@@ -446,7 +499,8 @@ async function dmarc(domain) {
     if (pct < 100) issues.push(`Enforcement covers only ${pct}% of failing mail.`);
     if (!parsed.rua) issues.push('No aggregate-report destination is published.');
     const status = !policy ? 'critical' : issues.length ? 'warning' : 'healthy';
-    return result('dmarc', 'DMARC', status, `${policy || 'incomplete'} · ${pct}%`, issues.join(' ') || 'Enforcement and aggregate reporting are configured.', status === 'healthy' ? 'Keep reviewing legitimate sources and failures.' : 'Align every legitimate sender, then move toward p=reject; pct=100.', { record: found[0], tags: parsed });
+    const policyLabel = policy ? `${policy.charAt(0).toUpperCase()}${policy.slice(1)}` : 'Incomplete';
+    return result('dmarc', 'DMARC', status, `${policyLabel} · ${pct}%`, issues.join(' ') || 'Enforcement and aggregate reporting are configured.', status === 'healthy' ? 'Keep reviewing legitimate sources and failures.' : 'Align every legitimate sender, then move toward p=reject; pct=100.', { record: found[0], tags: parsed });
   } catch (error) { return result('dmarc', 'DMARC', 'critical', 'No DMARC policy', error.message, 'Publish exactly one DMARC1 TXT record.'); }
 }
 
@@ -491,6 +545,7 @@ async function tlsRpt(domain) {
 }
 
 async function bimi(domain, dmarcResult) {
+  bimiLogos.delete(domain);
   try {
     const found = protocol(await txt(`default._bimi.${domain}`), 'v=BIMI1');
     if (found.length !== 1) return result('bimi', 'BIMI', 'warning', 'Not configured', 'Expected exactly one BIMI1 record.', 'Publish BIMI after DMARC enforcement and a compliant logo are ready.');
@@ -499,7 +554,8 @@ async function bimi(domain, dmarcResult) {
     if (!parsed.l?.startsWith('https://')) return result('bimi', 'BIMI', 'critical', 'Logo URL missing', 'The l tag must contain an HTTPS SVG URL.', 'Publish a compliant SVG Tiny P/S logo.', { record: found[0] });
     const logo = await get(parsed.l, 2097152); const safeSvg = logo.status === 200 && /<svg\b/i.test(logo.body) && !/<script\b|javascript:|<foreignObject\b/i.test(logo.body);
     if (!safeSvg) return result('bimi', 'BIMI', 'critical', 'Logo cannot be validated', `Logo endpoint returned HTTP ${logo.status}.`, 'Serve a safe, compliant SVG directly over HTTPS.', { record: found[0], logo_status: logo.status });
-    return result('bimi', 'BIMI', parsed.a ? 'healthy' : 'warning', parsed.a ? 'Logo and certificate published' : 'Self-asserted logo', parsed.a ? 'Record, logo, and evidence URL are present.' : 'No VMC/CMC evidence URL is published.', parsed.a ? 'Recheck after changes.' : 'Consider a VMC or CMC for broader support.', { record: found[0], tags: parsed });
+    bimiLogos.set(domain, { body: logo.body, etag: crypto.createHash('sha256').update(logo.body).digest('hex') });
+    return result('bimi', 'BIMI', parsed.a ? 'healthy' : 'warning', parsed.a ? 'Logo and certificate published' : 'Self-asserted logo', parsed.a ? 'Record, logo, and evidence URL are present.' : 'No VMC/CMC evidence URL is published.', parsed.a ? 'Recheck after changes.' : 'Consider a VMC or CMC for broader support.', { record: found[0], tags: parsed, logo_available: true });
   } catch (error) { return result('bimi', 'BIMI', 'warning', 'Not configured', error.message, 'Publish BIMI after DMARC enforcement is ready.'); }
 }
 
@@ -509,7 +565,7 @@ function certificate(endpoint) {
     const socket = tls.connect({ host: endpoint.host, port: endpoint.port, servername: endpoint.host, rejectUnauthorized: false, timeout: requestTimeoutMs }, () => {
       const cert = socket.getPeerCertificate(true); const authorized = socket.authorized; const authError = socket.authorizationError; socket.end();
       if (!cert.valid_to) return resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', `${endpoint.host}:${endpoint.port} unavailable`, 'No peer certificate was returned.', 'Check TLS availability.', evidence));
-      const expiry = new Date(cert.valid_to); const days = Math.floor((expiry - Date.now()) / 86400000); Object.assign(evidence, { issuer: cert.issuer, valid_to: expiry.toISOString(), authorized, authorization_error: authError });
+      const expiry = new Date(cert.valid_to); const days = Math.floor((expiry - Date.now()) / 86400000); Object.assign(evidence, { issuer: cert.issuer, valid_to: expiry.toISOString(), days_remaining: days, authorized, authorization_error: authError });
       if (!authorized) return resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', 'Certificate not trusted', String(authError), 'Install a publicly trusted certificate for this hostname.', evidence));
       const status = days < 14 ? 'critical' : days < 30 ? 'warning' : 'healthy'; resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', status, `${days} days remaining`, `${endpoint.host}:${endpoint.port} presents a trusted certificate.`, days < 30 ? 'Confirm renewal is scheduled and working.' : 'No action required.', evidence));
     });
@@ -644,11 +700,25 @@ async function checkDomain(entry, config) {
   if (!certs.length) certs.push(result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
   return summarize(entry.domain, [dm, aggregate, keys, sts, tlsreport, ...certs, brand], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls });
 }
-function demo() { const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',messages:620},{ip:'198.51.100.8',messages:381}] }; const aggregateCheck = result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,249 messages failed in 7 days.','Review the top failing sources.',aggregate); return summarize('example.com', [result('dmarc','DMARC','warning','quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','Reports enabled','SMTP TLS failures have a report destination.','Review TLS reports.'), result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465}), result('bimi','BIMI','warning','Self-asserted logo','No mark certificate is published.','Consider a VMC or CMC.')], { aggregate, failure:{available:true,count:2,period_days:7}, smtp_tls:{available:true,reports:4,successful:8200,failed:14,success_rate:99.8,timeline:[{date:'2026-08-30',successful:1800,failed:6},{date:'2026-09-01',successful:3200,failed:5},{date:'2026-09-02',successful:3200,failed:3}],failure_types:[{type:'validation-failure',count:9},{type:'starttls-not-supported',count:5}],organizations:[{name:'Example Reporter',sessions:8214}] } }); }
+function demo() { const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',messages:620},{ip:'198.51.100.8',messages:381}] }; const aggregateCheck = result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,249 messages failed in 7 days.','Review the top failing sources.',aggregate); return summarize('example.com', [result('dmarc','DMARC','warning','Quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','Reports enabled','SMTP TLS failures have a report destination.','Review TLS reports.'), result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465,days_remaining:64}), result('bimi','BIMI','warning','Self-asserted logo','No mark certificate is published.','Consider a VMC or CMC.')], { aggregate, failure:{available:true,count:2,period_days:7}, smtp_tls:{available:true,reports:4,successful:8200,failed:14,success_rate:99.8,timeline:[{date:'2026-08-30',successful:1800,failed:6},{date:'2026-09-01',successful:3200,failed:5},{date:'2026-09-02',successful:3200,failed:3}],failure_types:[{type:'validation-failure',count:9},{type:'starttls-not-supported',count:5}],organizations:[{name:'Example Reporter',sessions:8214}] } }); }
 
 async function refresh() {
   if (activeRefresh) return activeRefresh; snapshot.refreshing = true;
-  activeRefresh = (async () => { try { const config = process.env.DEMO_MODE === 'true' ? null : settingsConfig(); const domains = config ? await Promise.all(config.domains.map(v => checkDomain(v, config))) : [demo()]; snapshot = { version: APP_VERSION, generated_at: new Date().toISOString(), refreshing: false, configuration_required: !domains.length, domains, summary: { critical: domains.reduce((n,d)=>n+d.counts.critical,0), warning: domains.reduce((n,d)=>n+d.counts.warning,0), healthy: domains.reduce((n,d)=>n+d.counts.healthy,0) } }; } catch (error) { snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message }; } finally { activeRefresh = null; } return snapshot; })(); return activeRefresh;
+  activeRefresh = (async () => { try { const config = process.env.DEMO_MODE === 'true' ? null : settingsConfig(); const domains = config ? await Promise.all(config.domains.map(v => checkDomain(v, config))) : [demo()]; snapshot = { version: APP_VERSION, generated_at: new Date().toISOString(), refreshing: false, configuration_required: !domains.length, domains, summary: { critical: domains.reduce((n,d)=>n+d.counts.critical,0), warning: domains.reduce((n,d)=>n+d.counts.warning,0), healthy: domains.reduce((n,d)=>n+d.counts.healthy,0) } }; } catch (error) { addDiagnosticEvent('mailposture', 'error', 'Domain checks failed', error.message); snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message }; } finally { activeRefresh = null; } return snapshot; })(); return activeRefresh;
+}
+
+function serveBimiLogo(res, requestUrl) {
+  const domain = String(requestUrl.searchParams.get('domain') || '').toLowerCase();
+  const logo = validDomain(domain) ? bimiLogos.get(domain) : null;
+  if (!logo) return json(res, 404, { error: 'No validated BIMI logo is cached for this domain. Run checks again.' });
+  res.writeHead(200, {
+    'content-type': 'image/svg+xml; charset=utf-8',
+    'cache-control': 'private, max-age=300',
+    'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+    'x-content-type-options': 'nosniff',
+    etag: `\"${logo.etag}\"`
+  });
+  res.end(logo.body);
 }
 
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(body); }
@@ -656,15 +726,18 @@ function requestJson(req, maxBytes = 65536) { return new Promise((resolve, rejec
 function staticFile(req, res) { const pathname = req.url.split('?')[0]; const name = ['/', '/domains', '/status', '/settings', '/help'].includes(pathname) ? 'index.html' : pathname.replace(/^\//, ''); const file = path.normalize(path.join(PUBLIC, name)); if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); } fs.readFile(file, (e, data) => { if (e) { res.writeHead(404); return res.end(); } const type = { '.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml' }[path.extname(file)] || 'application/octet-stream'; res.writeHead(200, { 'content-type': type, 'x-content-type-options':'nosniff' }); res.end(data); }); }
 function scheduleRefresh(minutes) { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = setInterval(refresh, Math.max(1, minutes) * 60000); refreshTimer.unref(); }
 const server = http.createServer(async (req,res) => {
-  const pathname = req.url.split('?')[0];
+  const requestUrl = new URL(req.url, 'http://localhost');
+  const pathname = requestUrl.pathname;
   if (pathname === '/healthz') return json(res, snapshot.error ? 503 : 200, { ok: !snapshot.error, version: APP_VERSION, uptime_seconds: Math.floor((Date.now()-startedAt)/1000) });
   if (pathname === '/api/status' && req.method === 'GET') return json(res,200,snapshot);
   if (pathname === '/api/system-status' && req.method === 'GET') { try { return json(res, 200, await systemStatus()); } catch (error) { return json(res, 500, { version: APP_VERSION, checked_at: new Date().toISOString(), status: 'critical', checks: [], error: error.message }); } }
+  if (pathname === '/api/system-logs' && req.method === 'GET') return json(res, 200, diagnosticLog());
+  if (pathname === '/api/bimi-logo' && req.method === 'GET') return serveBimiLogo(res, requestUrl);
   if (pathname === '/api/refresh' && req.method === 'POST') return json(res,202,await refresh());
   if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, publicSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }
   if (pathname === '/api/settings' && req.method === 'PUT') { try { const settings = await saveSettings(await requestJson(req)); if (activeRefresh) await activeRefresh; await refresh(); return json(res, 200, settings); } catch (error) { return json(res, 400, { error: error.message }); } }
   staticFile(req,res);
 });
-function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
+function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); addDiagnosticEvent('mailposture', 'info', 'MailPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, validCron, summarize, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, validCron, summarize, refresh, getSnapshot:()=>snapshot };
