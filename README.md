@@ -75,7 +75,7 @@ TLS reporting organizations are the outside mail providers that sent TLS-RPT dat
 
 Top failing DMARC sources include the source IP address and, when available, parsedmarc's saved host name, base domain, and network owner. If no saved host name exists, MailPosture attempts a bounded reverse-DNS lookup. A PTR name is supporting context and is not proof that the named organization authorized the traffic.
 
-When BIMI publishes a safe SVG logo over HTTPS and passes validation, MailPosture displays it on the BIMI control card through a same-origin, sandboxed image response. Remote logo markup is not inserted into the page.
+When BIMI publishes a safe SVG logo over HTTPS and passes validation, MailPosture displays it on the BIMI control card through a same-origin, sandboxed image response. Remote logo markup is not inserted into the page. If a domain intentionally uses a self-asserted logo without a VMC or CMC, its domain editor can ignore only that review item permanently or for 1–120 months. The BIMI card remains visible and labeled **Ignored**; invalid records, unsafe logos, and unmet DMARC prerequisites are never suppressed.
 
 The parsedmarc tab manages the general, mailbox, IMAP, and OpenSearch options used by the bundled IMAP-to-OpenSearch pipeline. Monthly indexes are enabled by default for new configurations to avoid creating a large number of small report indexes. For a single OpenSearch node, use one shard and zero replicas. Less common outputs and collectors, including Kafka, S3, Splunk, Gmail API, and Microsoft Graph, remain advanced file-based configuration. MailPosture does not parse, move, or delete report messages itself; parsedmarc performs the configured mailbox actions.
 
@@ -85,7 +85,9 @@ A yellow OpenSearch cluster is expected when a single-node cluster has replica s
 
 The Report indexes card has **All domains** scope because its patterns query shared cluster indexes, not one selected domain. Each pattern appears on its own line and can be expanded to show the matching physical indexes, health, document count, primary shards, and replicas. An unavailable aggregate or SMTP TLS pattern means OpenSearch has no matching index yet; confirm that the report type is enabled and matching messages reach the mailbox. A missing individual DMARC failure (RUF) index is informational, not an error, because many providers never send these optional reports.
 
-The in-app operational log is intentionally limited to state changes detected by MailPosture. The standalone Compose file also writes or mounts bounded service logs from MailPosture, OpenSearch, and ParseDMARC. MailPosture exposes only a fixed service list, reads the volumes without write access, limits the number and size of files returned, and redacts common password, token, secret, and authorization labels. This is defense in depth, not a guarantee that logs contain no sensitive metadata. Review logs before sharing them. External deployments leave service-log viewing disabled unless equivalent read-only mounts are configured.
+The in-app **Event history** is intentionally limited to state changes detected by MailPosture. Its entries are historical, so a brief failure remains visible after the current status cards show that the service recovered. The standalone Compose file also writes or mounts bounded service logs from MailPosture, OpenSearch, and ParseDMARC. MailPosture exposes only a fixed service list, reads the volumes without write access, limits the number and size of files returned, and redacts common password, token, secret, and authorization labels. This is defense in depth, not a guarantee that logs contain no sensitive metadata. Review logs before sharing them. External deployments leave service-log viewing disabled unless equivalent read-only mounts are configured.
+
+The standalone OpenSearch health check waits for cluster status **yellow** or **green**. A red cluster can still answer its HTTP endpoint, but it is not marked healthy and dependent services do not start until primary shards are available or the health-check retries are exhausted.
 
 Failure reports can contain message headers or content. MailPosture shows counts but intentionally does not display those samples.
 
@@ -208,7 +210,7 @@ MailPosture uses semantic versioning:
 - Features increment the second number and reset the third number to zero, such as `1.2.1` to `1.3.0`.
 - Incompatible changes increment the first number.
 
-This feature release is version `1.1.0`.
+This feature release is version `1.2.0`.
 
 ## 5. Reverse proxy
 

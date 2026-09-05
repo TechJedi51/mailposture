@@ -172,6 +172,9 @@ html[data-theme="light"] .certificate-days{opacity:.09}
 .state.info{color:var(--blue)}
 .status-symbol.info{color:var(--blue)}
 .system-status-card.info{border-color:color-mix(in srgb,var(--blue) 34%,var(--line))}
+.state.ignored{color:var(--blue)}
+.status-symbol.ignored{color:var(--blue)}
+.card.ignored{border-color:color-mix(in srgb,var(--blue) 34%,var(--line))}
 .system-scope{margin:-12px 0 12px;padding:4px 8px;border-radius:999px;background:var(--raised);color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.04em;text-transform:uppercase}
 .system-breakdown,.index-patterns{width:100%;margin:0 0 18px;padding:14px;border:1px solid var(--line);border-radius:12px;background:color-mix(in srgb,var(--raised) 42%,transparent)}
 .system-breakdown>strong,.index-patterns>strong{font-size:12px}

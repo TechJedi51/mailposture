@@ -15,7 +15,7 @@ async function run(){
   assert.deepStrictEqual(settings.monitored_domains,['example.com']);
   assert.strictEqual(settings.opensearch_enabled,true);
   assert.strictEqual(settings.report_source,'standalone');
-  assert.strictEqual(settings.schema_version,3);
+  assert.strictEqual(settings.schema_version,4);
   assert.strictEqual(settings.mailbox.archive_folder,'Archive');
   assert.strictEqual(settings.parsedmarc.general.save_smtp_tls,true);
   assert.strictEqual(settings.parsedmarc.mailbox.delete_smtp_tls,false);
@@ -23,6 +23,16 @@ async function run(){
   assert.strictEqual(settings.parsedmarc.opensearch.monthly_indexes,true);
   assert.strictEqual(app.normalizeSettings({parsedmarc:{mailbox:{batch_size:0}}}).parsedmarc.mailbox.batch_size,0);
   assert.strictEqual(settings.snapshots.cron,'0 2 * * *');
+  const bimiSettings=app.normalizeSettings({monitored_domains:['example.com'],bimi_exceptions:{'example.com':{mode:'permanent'},'other.example':{mode:'permanent'}}});
+  assert.deepStrictEqual(bimiSettings.bimi_exceptions,{'example.com':{mode:'permanent'}});
+  assert.deepStrictEqual(app.settingsConfig(bimiSettings).domains[0].bimi_exception,{mode:'permanent'});
+  assert.strictEqual(app.activeBimiException({mode:'permanent'}).active,true);
+  assert.strictEqual(app.activeBimiException({mode:'until',expires_at:'2099-01-01T00:00:00.000Z'},Date.parse('2026-01-01T00:00:00.000Z')).active,true);
+  assert.strictEqual(app.activeBimiException({mode:'until',expires_at:'2025-01-01T00:00:00.000Z'},Date.parse('2026-01-01T00:00:00.000Z')).active,false);
+  assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],bimi_exceptions:{'example.com':{mode:'until',expires_at:'not-a-date'}}}),/Invalid BIMI exception expiration/);
+  const ignoredSummary=app.summarize('example.com',[{status:'healthy'},{status:'ignored'}]);
+  assert.strictEqual(ignoredSummary.status,'healthy');
+  assert.strictEqual(ignoredSummary.counts.ignored,1);
   process.env.OPENSEARCH_VERIFY_TLS='true';
   assert.strictEqual(app.normalizeSettings({monitored_domains:['example.com']}).opensearch_verify_tls,true);
   delete process.env.OPENSEARCH_VERIFY_TLS;
@@ -71,7 +81,7 @@ async function run(){
   assert.strictEqual(shards.affected_report_shards,0);
   assert.strictEqual(shards.groups.find(group=>group.category==='OpenSearch security audit logs').unassigned_shards,1);
   process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);
-  assert.strictEqual(require('../package.json').version,'1.1.0');
+  assert.strictEqual(require('../package.json').version,'1.2.0');
   const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),styles=fs.readFileSync('public/settings.css','utf8'),icon=fs.readFileSync('public/mailposture.svg','utf8'),standalone=fs.readFileSync('compose.standalone.yml','utf8');
   assert.match(page,/MailPosture/);
   assert.match(page,/id="dashboard-view"/);
@@ -81,7 +91,10 @@ async function run(){
   assert.match(page,/id="log-service"/);
   assert.match(page,/id="service-log"/);
   assert.match(page,/id="service-log-service"/);
-  assert.match(page,/v1\.1\.0/);
+  assert.match(page,/v1\.2\.0/);
+  assert.match(page,/Event history/);
+  assert.match(page,/id="bimi-ignore-mode"/);
+  assert.match(page,/id="bimi-ignore-months"/);
   assert.match(page,/href="\/status"/);
   assert.match(page,/dashboard-icon/);
   assert.match(page,/monitored-domains-icon/);
@@ -118,6 +131,9 @@ async function run(){
   assert.match(client,/Reporter name not provided/);
   assert.match(client,/Scope:/);
   assert.match(client,/api\/bimi-logo/);
+  assert.match(client,/bimi_exceptions/);
+  assert.match(client,/bimiExceptionDirty/);
+  assert.match(client,/ignored: 'Ignored'/);
   assert.match(client,/certificate-days/);
   assert.match(client,/issue-status/);
   assert.match(client,/data-report-target/);
@@ -137,6 +153,8 @@ async function run(){
   assert.match(standalone,/opensearch_logs/);
   assert.match(standalone,/target: \/logs\/opensearch/);
   assert.match(standalone,/log_file="\/run\/mailposture\/parsedmarc\.log"/);
+  assert.match(standalone,/wait_for_status=yellow/);
+  assert.match(standalone,/timed_out/);
   assert.match(styles,/#0c71c3/i);
   assert.match(styles,/monitored-domains\.svg/);
   assert.match(styles,/appearance\.svg/);
@@ -152,6 +170,7 @@ async function run(){
   assert.match(styles,/\.system-log/);
   assert.match(styles,/\.service-log/);
   assert.match(styles,/\.index-patterns/);
+  assert.match(styles,/\.state\.ignored/);
   assert.match(styles,/--review:#ffd60a/i);
   assert.match(icon,/<svg/);
   assert.match(icon,/check mark/i);
