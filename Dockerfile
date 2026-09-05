@@ -1,6 +1,6 @@
 FROM node:22-alpine
 WORKDIR /app
-COPY package.json server.js ./
+COPY package.json server.js smtp.js ./
 COPY public ./public
 RUN mkdir -p /data && chown node:node /data
 USER node

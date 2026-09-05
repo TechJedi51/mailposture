@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v1.2.0</small></span>
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v1.3.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
@@ -60,7 +60,7 @@
     <nav id="domains" aria-label="Domains"></nav>
     <section id="attention" class="attention"></section>
     <section class="report-center" id="report-center" tabindex="-1">
-      <div class="heading"><div><small>Report center</small><h2>Observed email traffic</h2></div><p>Parsed by parsedmarc and stored in OpenSearch.</p></div>
+      <div class="heading"><div><small>Report center</small><h2>Mail traffic and services</h2></div><p>Historical report data and live SMTP diagnostics.</p></div>
       <div id="domain-reports" class="report-grid"></div>
     </section>
     <section class="matrix">
@@ -198,7 +198,8 @@
         <article><h3>DKIM</h3><p>Checks each configured selector for a published public key and reports missing, revoked, or weak RSA keys. Selectors must be entered because DNS cannot reliably discover them.</p></article>
         <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, and whether the policy covers every published MX host.</p></article>
         <article><h3>TLS reporting</h3><p>Checks for a valid TLS-RPT record and summarizes stacked SMTP session results, reporting organizations, and failure types from parsedmarc. A reporting organization is an outside mail provider that supplied TLS-RPT data about its delivery attempts to your domain. The values count SMTP sessions, not messages. Use Show reporter source fields to verify the organization fields stored by parsedmarc when a name is missing. Processed reports normally move to <code>Archive/SMTP-TLS</code>; MailPosture reads the normalized OpenSearch data.</p></article>
-        <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS on ports 25 and 587 is not currently tested.</p></article>
+        <article><h3>SMTP service</h3><p>Tests each published MX host on TCP port 25 for connection and transaction time, forward-confirmed reverse DNS, a valid host name, banner alignment, STARTTLS negotiation and certificate trust, and unauthenticated relay protection. Results reflect MailPosture’s network location, and the container must be allowed outbound TCP port 25. The relay probe uses reserved example addresses and stops before DATA, so it never sends a message. If the server accepts the recipient from MailPosture’s network, verify from an external network because a locally trusted source can relay by design.</p></article>
+        <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS for published MX hosts is tested separately by SMTP service diagnostics.</p></article>
         <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published. After validation, the logo appears on the BIMI control card through MailPosture’s same-origin image endpoint. If you intentionally use a self-asserted logo without a VMC or CMC, edit the domain to ignore only that review item permanently or for 1–120 months. Other BIMI problems remain actionable.</p></article>
       </div>
     </section>
@@ -225,7 +226,7 @@
         <div><dt>Posture score</dt><dd>A summary indicator weighted by control status. It helps prioritize work but does not replace the evidence shown for each check.</dd></div>
       </dl>
     </section>
-    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and OpenSearch report data. In the standalone deployment, saving Settings writes parsedmarc’s active configuration, triggers an automatic parsedmarc reload, and manages the OpenSearch snapshot policy. parsedmarc—not MailPosture—moves report messages into its Archive subfolders.</p></section>
+    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and OpenSearch report data. SMTP diagnostics open a session to each published MX host and send only EHLO, MAIL FROM, RCPT TO, RSET, STARTTLS, and QUIT commands using reserved example addresses; they never send DATA or message content. In the standalone deployment, saving Settings writes parsedmarc’s active configuration, triggers an automatic parsedmarc reload, and manages the OpenSearch snapshot policy. parsedmarc—not MailPosture—moves report messages into its Archive subfolders.</p></section>
   </main>
 
   <dialog id="detail-dialog"><button class="close" type="button" aria-label="Close">×</button><div id="detail"></div></dialog>

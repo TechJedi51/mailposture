@@ -1,6 +1,6 @@
 # MailPosture with Dockhand
 
-MailPosture is a generic, management-focused status page for DMARC aggregate and failure reports, SMTP TLS reports, DKIM, MTA-STS, TLS certificates, and BIMI. It contains no user-specific domain configuration. Operational settings are entered in the web interface and saved in persistent storage; Dockhand supplies deployment secrets and storage paths.
+MailPosture is a generic, management-focused status page for DMARC aggregate and failure reports, SMTP TLS reports, live SMTP service diagnostics, DKIM, MTA-STS, TLS certificates, and BIMI. It contains no user-specific domain configuration. Operational settings are entered in the web interface and saved in persistent storage; Dockhand supplies deployment secrets and storage paths.
 
 ## Included files
 
@@ -12,6 +12,7 @@ mailposture/
 ├── Dockerfile
 ├── .env.example
 ├── server.js
+├── smtp.js
 ├── public/
 └── test/
 ```
@@ -21,7 +22,7 @@ Use `docker-compose.yml` when parsedmarc and OpenSearch already exist. Use `comp
 ## Interface
 
 - **Dashboard** shows the organization-wide score, domain scores, open issues, stacked aggregate DMARC trends, optional DMARC failure-report counts, and stacked SMTP TLS results.
-- **Domains** shows the detailed status, report center, attention queue, evidence, and control matrix for one domain at a time.
+- **Domains** shows the detailed status, report center, attention queue, SMTP diagnostics, evidence, and control matrix for one domain at a time.
 - **System Status** directly checks MailPosture storage and refreshes, OpenSearch authentication and cluster health, report indexes, the generated ParseDMARC configuration, and the bundled collector heartbeat. It includes both a privacy-safe operational event log and bounded, redacted service-log views for the standalone MailPosture, OpenSearch, and ParseDMARC services.
 - **Settings** separates monitored domains, appearance, OpenSearch, and parsedmarc configuration into accessible tabs with keyboard navigation.
 - **Help** explains setup, every check, and the terminology used by the application.
@@ -44,7 +45,7 @@ Edit a domain, then add each active selector by its label, such as `selector1` o
 
 Edit a domain, then add each endpoint as a host and port, such as `mta-sts.example.com` on port `443` or `mail.example.com` on port `465`.
 
-Direct TLS endpoints such as HTTPS 443, SMTP 465, and IMAP 993 are supported. SMTP STARTTLS on ports 25 and 587 is not currently probed.
+Direct TLS endpoints such as HTTPS 443, SMTP 465, and IMAP 993 are supported. MailPosture also discovers every monitored domain’s published MX hosts and probes SMTP on TCP port 25. It measures connection and transaction time, validates forward-confirmed reverse DNS and the SMTP banner host, negotiates STARTTLS and checks certificate trust, and checks whether an unauthenticated external recipient is rejected. Results reflect MailPosture’s network location, and the container must be allowed outbound TCP port 25; a firewall or hosting-provider block is reported as a connection failure and should be distinguished from an unavailable MX host. The relay probe uses reserved example addresses and stops before `DATA`; it never submits message content. If the recipient is accepted, MailPosture reports **External verification required** rather than declaring an open relay: a mail server can legitimately permit relaying from the trusted network where MailPosture runs, so a conclusive public test must originate outside that network.
 
 ### Report source
 
@@ -136,7 +137,7 @@ The first push to `main` starts **Test and publish container image** under the r
 - builds `linux/amd64` and `linux/arm64` images;
 - publishes `ghcr.io/OWNER/REPOSITORY:latest`;
 - also publishes an immutable `sha-...` tag;
-- publishes version tags when a tag such as `v1.2.0` is pushed.
+- publishes version tags when a tag such as `v1.3.0` is pushed.
 
 No registry password is required in the workflow. GitHub's temporary `GITHUB_TOKEN` publishes the image to the repository's GHCR package.
 
@@ -210,7 +211,7 @@ MailPosture uses semantic versioning:
 - Features increment the second number and reset the third number to zero, such as `1.2.1` to `1.3.0`.
 - Incompatible changes increment the first number.
 
-This feature release is version `1.2.0`.
+This feature release is version `1.3.0`.
 
 ## 5. Reverse proxy
 

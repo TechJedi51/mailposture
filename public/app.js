@@ -84,8 +84,19 @@ function reportingOrganizationsCard(report, id = '') {
   return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>TLS reporting organizations</h3><p>Mail providers that sent TLS-RPT data about delivery attempts to your domain</p></div></div><p class="report-explanation">Each value is the number of reported SMTP delivery sessions, not messages. ${missingName ? '“Reporter name not provided” means the stored report did not contain a recognized organization-name field; open the source fields below to verify what parsedmarc saved.' : 'The source fields below let you verify the names parsedmarc stored.'}</p>${rankedList(organizations, 'name', 'sessions', 'No TLS reporting organizations were found.')}${raw}</article>`;
 }
 
+function smtpDiagnosticsCard(report, id = '') {
+  const endpoints = report?.endpoints || [];
+  if (!endpoints.length) return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>SMTP service diagnostics</h3><p>Live checks of the domain’s published MX hosts on TCP port 25.</p></div></div><p class="report-empty">No SMTP diagnostic results are available.</p></article>`;
+  const endpointCards = endpoints.map(endpoint => {
+    const tests = (endpoint.tests || []).map(test => `<div class="smtp-test ${esc(test.status)}"><span>${statusSymbol(test.status)}</span><div><strong>${esc(test.label)}</strong><small>${esc(test.detail)}</small></div><b>${esc(test.value)}</b></div>`).join('');
+    const transcript = endpoint.transcript?.length ? `<details class="smtp-transcript"><summary>Session transcript</summary><p>The probe uses reserved example addresses and stops before DATA. No message content is sent.</p><pre>${esc(endpoint.transcript.join('\n'))}</pre></details>` : '';
+    return `<section class="smtp-endpoint"><div class="smtp-endpoint-heading"><div><strong>${esc(endpoint.host)}:${number(endpoint.port || 25)}</strong><span>${esc(endpoint.ip_address || 'Address unavailable')}</span></div><span class="state ${esc(endpoint.status)}">${esc(names[endpoint.status] || endpoint.status)}</span></div><div class="smtp-tests">${tests}</div>${transcript}</section>`;
+  }).join('');
+  return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>SMTP service diagnostics</h3><p>Connection speed, server identity, STARTTLS, and relay protection for each published MX host.</p></div></div><p class="report-explanation">Connection and transaction times at or above 5 seconds need review; times at or above 15 seconds need action. The relay probe never sends DATA or message content. Acceptance from a trusted local network requires a second test from outside the organization before it can be called an open relay.</p><div class="smtp-endpoints">${endpointCards}</div></article>`;
+}
+
 function detailCards(reports) {
-  return `${aggregateCard(reports?.aggregate, true, 'report-dmarc')} ${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls')} ${failureCard(reports?.failure, 'report-dmarc-failure')}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages, with reverse-DNS names when available</p></div></div>${sourceList(reports?.aggregate?.top_failing_sources)}</article><article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}`;
+  return `${aggregateCard(reports?.aggregate, true, 'report-dmarc')} ${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls')} ${failureCard(reports?.failure, 'report-dmarc-failure')}${smtpDiagnosticsCard(reports?.smtp_diagnostics, 'report-smtp-diagnostics')}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages, with reverse-DNS names when available</p></div></div>${sourceList(reports?.aggregate?.top_failing_sources)}</article><article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}`;
 }
 
 function organizationReports(domains) {
@@ -317,6 +328,7 @@ function detail(id) {
 
 function reportDestination(check) {
   if (check.id === 'dmarc_reports' || check.id === 'dmarc' || check.id === 'dkim') return { id: 'report-dmarc', label: 'View DMARC reports' };
+  if (check.id === 'smtp_service') return { id: 'report-smtp-diagnostics', label: 'View SMTP diagnostics' };
   if (check.id === 'tls_rpt' || check.id === 'mta_sts' || check.id.startsWith('tls_')) return { id: 'report-smtp-tls', label: 'View SMTP TLS reports' };
   return { id: 'report-center', label: 'View domain reports' };
 }
